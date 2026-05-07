@@ -1,0 +1,35 @@
+
+# =====================
+# DATA (VERY IMPORTANT)
+# =====================
+project/data/raw/*.json
+project/data/raw/*.jsonl
+project/data/raw/*.zip
+
+project/data/processed/*
+project/data/embeddings/**
+
+# =====================
+# PYTHON
+# =====================
+__pycache__/
+*.pyc
+
+# =====================
+# ENVIRONMENT
+# =====================
+venv/
+.env
+
+# =====================
+# NOTEBOOKS
+# =====================
+.ipynb_checkpoints/
+
+# =====================
+# MODEL ARTIFACTS
+# =====================
+*.pkl
+*.faiss
+*.parquet
+
