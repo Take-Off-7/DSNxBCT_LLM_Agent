@@ -2,44 +2,47 @@ import os
 import pandas as pd
 from fastapi import FastAPI
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
 from models.review_generator import generate_review
 from models.user_profile import build_user_profile
 
+# -------------------------------------------------
+# Load environment variables
+# -------------------------------------------------
+load_dotenv()
+
 app = FastAPI(title="LLM Agent Hackathon API")
 
 # -------------------------------------------------
-# Load dataset (safe path)
+# Safe BASE DIR (IMPORTANT FIX)
 # -------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 reviews_path = os.path.join(BASE_DIR, "data/processed/reviews.csv")
 businesses_path = os.path.join(BASE_DIR, "data/processed/businesses.csv")
 
+# -------------------------------------------------
+# Load datasets
+# -------------------------------------------------
 reviews_df = pd.read_csv(reviews_path)
 businesses_df = pd.read_csv(businesses_path)
 
 # -------------------------------------------------
 # Lookup maps
 # -------------------------------------------------
-
-# user_id → fake readable name (for testing)
 user_ids = reviews_df["user_id"].unique()
 user_name_map = {f"user_{i}": uid for i, uid in enumerate(user_ids)}
+user_name_reverse = {v: k for k, v in user_name_map.items()}
 
-# business name → business_id (case-insensitive safe fix)
 business_name_to_id = {
-    str(name).lower(): bid
+    str(name).strip().lower(): bid
     for name, bid in zip(businesses_df["name"], businesses_df["business_id"])
 }
 
-# reverse lookup (optional)
-user_name_reverse = {v: k for k, v in user_name_map.items()}
-
 # -------------------------------------------------
-# Resolver functions (IMPROVED)
+# Resolver functions
 # -------------------------------------------------
-
 def resolve_user_id(user_name: str):
     return user_name_map.get(user_name)
 
@@ -47,13 +50,11 @@ def resolve_user_id(user_name: str):
 def resolve_business_id(business_name: str):
     if not business_name:
         return None
-
-    return business_name_to_id.get(business_name.lower())
+    return business_name_to_id.get(business_name.strip().lower())
 
 # -------------------------------------------------
 # Request Models
 # -------------------------------------------------
-
 class ReviewRequest(BaseModel):
     user_id: str
     business_id: str
@@ -72,12 +73,16 @@ class ProfileRequest(BaseModel):
 # -------------------------------------------------
 @app.get("/")
 def home():
-    return {"message": "LLM Agent API running ✔"}
+    return {
+        "message": "LLM Agent API running ✔",
+        "docs": "/docs",
+        "samples": "/samples",
+        "demo": "/demo-input"
+    }
 
 # -------------------------------------------------
-# 🔥 NEW: HELPERS FOR TESTING (IMPORTANT FOR JUDGES)
+# SAMPLE ENDPOINTS (IMPORTANT FOR JUDGES)
 # -------------------------------------------------
-
 @app.get("/samples")
 def get_samples():
     return {
@@ -88,25 +93,28 @@ def get_samples():
 
 @app.get("/demo-input")
 def demo_input():
-    sample = reviews_df.merge(businesses_df, on="business_id").sample(5)
+    try:
+        sample = reviews_df.merge(businesses_df, on="business_id").sample(5)
 
-    return [
-        {
-            "user_id": row["user_id"],
-            "business_name": row["name"]
-        }
-        for _, row in sample.iterrows()
-    ]
+        return [
+            {
+                "user_id": row["user_id"],
+                "business_name": row["name"]
+            }
+            for _, row in sample.iterrows()
+        ]
+    except Exception as e:
+        return {"error": str(e)}
 
 # -------------------------------------------------
-# TASK A (ID-based)
+# TASK A - REVIEW (ID-BASED)
 # -------------------------------------------------
 @app.post("/review")
 def review_endpoint(req: ReviewRequest):
     return generate_review(req.user_id, req.business_id)
 
 # -------------------------------------------------
-# TASK A (NAME-based)
+# TASK A - REVIEW (NAME-BASED)
 # -------------------------------------------------
 @app.post("/review-by-name")
 def review_by_name(req: ReviewRequestByName):
@@ -117,13 +125,13 @@ def review_by_name(req: ReviewRequestByName):
     if not user_id:
         return {
             "error": "User not found",
-            "hint": "Call /samples to get valid user_ids"
+            "hint": "Use /samples to get valid user_ids"
         }
 
     if not business_id:
         return {
             "error": "Business not found",
-            "hint": "Call /samples to get valid business names"
+            "hint": "Use /samples to get valid business names"
         }
 
     return generate_review(user_id, business_id)
