@@ -1,71 +1,157 @@
 import os
+import json
+import requests
 import pandas as pd
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-from models.review_generator import generate_review
 from models.user_profile import build_user_profile
+from models.review_generator import generate_review
 
 # -------------------------------------------------
 # Load environment variables
 # -------------------------------------------------
 load_dotenv()
 
-app = FastAPI(title="LLM Agent Hackathon API")
+# -------------------------------------------------
+# FastAPI App
+# -------------------------------------------------
+app = FastAPI(
+    title="LLM Agent Hackathon API",
+    description="User Modeling + Review Generation API",
+    version="1.0.0"
+)
 
 # -------------------------------------------------
-# Safe BASE DIR (IMPORTANT FIX)
+# Paths
 # -------------------------------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
 
-reviews_path = os.path.join(BASE_DIR, "data/processed/reviews.csv")
-businesses_path = os.path.join(BASE_DIR, "data/processed/businesses.csv")
+DATA_DIR = os.path.join(
+    BASE_DIR,
+    "data",
+    "processed"
+)
+
+reviews_path = os.path.join(
+    DATA_DIR,
+    "reviews.csv"
+)
+
+businesses_path = os.path.join(
+    DATA_DIR,
+    "businesses.csv"
+)
+
+# -------------------------------------------------
+# Lazy-loaded DataFrames
+# -------------------------------------------------
+reviews_df = None
+businesses_df = None
 
 # -------------------------------------------------
 # Load datasets
 # -------------------------------------------------
-reviews_df = pd.read_csv(reviews_path)
-businesses_df = pd.read_csv(businesses_path)
+def load_data():
+
+    global reviews_df
+    global businesses_df
+
+    if reviews_df is None:
+
+        reviews_df = pd.read_csv(
+            reviews_path
+        )
+
+    if businesses_df is None:
+
+        businesses_df = pd.read_csv(
+            businesses_path
+        )
 
 # -------------------------------------------------
-# Lookup maps
+# Startup Event
 # -------------------------------------------------
-user_ids = reviews_df["user_id"].unique()
-user_name_map = {f"user_{i}": uid for i, uid in enumerate(user_ids)}
-user_name_reverse = {v: k for k, v in user_name_map.items()}
+@app.on_event("startup")
+def startup_event():
 
-business_name_to_id = {
-    str(name).strip().lower(): bid
-    for name, bid in zip(businesses_df["name"], businesses_df["business_id"])
-}
+    load_data()
 
 # -------------------------------------------------
-# Resolver functions
+# User mapping helpers
 # -------------------------------------------------
-def resolve_user_id(user_name: str):
-    return user_name_map.get(user_name)
+def get_user_maps():
 
+    user_ids = reviews_df[
+        "user_id"
+    ].unique()
 
-def resolve_business_id(business_name: str):
+    user_name_map = {
+        f"user_{i}": uid
+        for i, uid in enumerate(user_ids)
+    }
+
+    reverse_map = {
+        uid: name
+        for name, uid in user_name_map.items()
+    }
+
+    return user_name_map, reverse_map
+
+# -------------------------------------------------
+# Business mapping helper
+# -------------------------------------------------
+def get_business_map():
+
+    return {
+
+        str(name).strip().lower(): bid
+
+        for name, bid in zip(
+            businesses_df["name"],
+            businesses_df["business_id"]
+        )
+    }
+
+# -------------------------------------------------
+# Resolve functions
+# -------------------------------------------------
+def resolve_user_id(user_name):
+
+    user_map, _ = get_user_maps()
+
+    return user_map.get(user_name)
+
+def resolve_business_id(business_name):
+
     if not business_name:
         return None
-    return business_name_to_id.get(business_name.strip().lower())
+
+    business_map = get_business_map()
+
+    return business_map.get(
+        business_name.strip().lower()
+    )
 
 # -------------------------------------------------
 # Request Models
 # -------------------------------------------------
 class ReviewRequest(BaseModel):
+
     user_id: str
     business_id: str
 
-
 class ReviewRequestByName(BaseModel):
+
     user_name: str
     business_name: str
 
-
 class ProfileRequest(BaseModel):
+
     user_id: str
 
 # -------------------------------------------------
@@ -73,72 +159,294 @@ class ProfileRequest(BaseModel):
 # -------------------------------------------------
 @app.get("/")
 def home():
+
     return {
-        "message": "LLM Agent API running ✔",
+
+        "message": "LLM Agent API Running ✔",
+
+        "features": [
+            "User Modeling",
+            "Review Generation",
+            "Behavior Simulation",
+            "Ollama Integration"
+        ],
+
         "docs": "/docs",
-        "samples": "/samples",
-        "demo": "/demo-input"
+
+        "available_endpoints": [
+            "/samples",
+            "/demo-input",
+            "/profile",
+            "/review",
+            "/review-by-name",
+            "/generate"
+        ]
     }
 
 # -------------------------------------------------
-# SAMPLE ENDPOINTS (IMPORTANT FOR JUDGES)
+# HEALTH CHECK
+# -------------------------------------------------
+@app.get("/health")
+def health():
+
+    return {
+        "status": "healthy"
+    }
+
+# -------------------------------------------------
+# SAMPLE USERS + BUSINESSES
 # -------------------------------------------------
 @app.get("/samples")
-def get_samples():
+def samples():
+
+    load_data()
+
+    user_map, _ = get_user_maps()
+
     return {
-        "sample_user_ids": list(user_name_map.values())[:5],
-        "sample_businesses": businesses_df[["name", "business_id"]].head(5).to_dict(orient="records")
+
+        "sample_users":
+        list(user_map.keys())[:10],
+
+        "sample_businesses":
+        businesses_df[
+            ["name", "business_id"]
+        ].head(10).to_dict(
+            orient="records"
+        )
     }
 
-
+# -------------------------------------------------
+# DEMO INPUT
+# -------------------------------------------------
 @app.get("/demo-input")
 def demo_input():
+
+    load_data()
+
     try:
-        sample = reviews_df.merge(businesses_df, on="business_id").sample(5)
+
+        merged = reviews_df.merge(
+            businesses_df,
+            on="business_id"
+        )
+
+        sample = merged.sample(5)
 
         return [
+
             {
                 "user_id": row["user_id"],
                 "business_name": row["name"]
             }
+
             for _, row in sample.iterrows()
         ]
+
     except Exception as e:
-        return {"error": str(e)}
+
+        return {
+            "error": str(e)
+        }
 
 # -------------------------------------------------
-# TASK A - REVIEW (ID-BASED)
+# PROFILE ENDPOINT
+# -------------------------------------------------
+@app.post("/profile")
+def profile(req: ProfileRequest):
+
+    try:
+
+        profile_data = build_user_profile(
+            req.user_id
+        )
+
+        return {
+
+            "success": True,
+            "profile": profile_data
+        }
+
+    except Exception as e:
+
+        return {
+
+            "success": False,
+            "error": str(e)
+        }
+
+# -------------------------------------------------
+# REVIEW ENDPOINT (IDs)
 # -------------------------------------------------
 @app.post("/review")
-def review_endpoint(req: ReviewRequest):
-    return generate_review(req.user_id, req.business_id)
+def review(req: ReviewRequest):
+
+    try:
+
+        result = generate_review(
+            req.user_id,
+            req.business_id
+        )
+
+        return result
+
+    except Exception as e:
+
+        return {
+
+            "success": False,
+            "error": str(e)
+        }
 
 # -------------------------------------------------
-# TASK A - REVIEW (NAME-BASED)
+# REVIEW ENDPOINT (Names)
 # -------------------------------------------------
 @app.post("/review-by-name")
 def review_by_name(req: ReviewRequestByName):
 
-    user_id = resolve_user_id(req.user_name)
-    business_id = resolve_business_id(req.business_name)
+    try:
 
-    if not user_id:
+        user_id = resolve_user_id(
+            req.user_name
+        )
+
+        if not user_id:
+
+            return {
+
+                "success": False,
+                "error": "User not found",
+                "hint": "Use /samples"
+            }
+
+        business_id = resolve_business_id(
+            req.business_name
+        )
+
+        if not business_id:
+
+            return {
+
+                "success": False,
+                "error": "Business not found",
+                "hint": "Use /samples"
+            }
+
+        result = generate_review(
+            user_id,
+            business_id
+        )
+
+        return result
+
+    except Exception as e:
+
         return {
-            "error": "User not found",
-            "hint": "Use /samples to get valid user_ids"
+
+            "success": False,
+            "error": str(e)
         }
 
-    if not business_id:
+# -------------------------------------------------
+# GENERATE (Hackathon Demo Endpoint)
+# -------------------------------------------------
+@app.post("/generate")
+def generate(req: ReviewRequestByName):
+
+    """
+    Cleaner demo-friendly endpoint
+    for judges and evaluators.
+    """
+
+    try:
+
+        user_id = resolve_user_id(
+            req.user_name
+        )
+
+        if not user_id:
+
+            return {
+
+                "success": False,
+                "error": "Unknown user",
+                "hint": "Use /samples"
+            }
+
+        business_id = resolve_business_id(
+            req.business_name
+        )
+
+        if not business_id:
+
+            return {
+
+                "success": False,
+                "error": "Unknown business",
+                "hint": "Use /samples"
+            }
+
+        result = generate_review(
+            user_id,
+            business_id
+        )
+
         return {
-            "error": "Business not found",
-            "hint": "Use /samples to get valid business names"
+
+            "success": True,
+
+            "input": {
+
+                "user_name": req.user_name,
+                "business_name": req.business_name
+            },
+
+            "output": result
         }
 
-    return generate_review(user_id, business_id)
+    except Exception as e:
+
+        return {
+
+            "success": False,
+            "error": str(e)
+        }
 
 # -------------------------------------------------
-# USER PROFILE
+# OLLAMA CHECK
 # -------------------------------------------------
-@app.post("/profile")
-def profile_endpoint(req: ProfileRequest):
-    return build_user_profile(req.user_id)
+@app.get("/llm-status")
+def llm_status():
+
+    try:
+
+        response = requests.get(
+            "http://localhost:11434/api/tags",
+            timeout=10
+        )
+
+        if response.status_code == 200:
+
+            models = response.json()
+
+            return {
+
+                "success": True,
+                "ollama_running": True,
+                "models": models
+            }
+
+        return {
+
+            "success": False,
+            "ollama_running": False
+        }
+
+    except Exception as e:
+
+        return {
+
+            "success": False,
+            "ollama_running": False,
+            "error": str(e)
+        }

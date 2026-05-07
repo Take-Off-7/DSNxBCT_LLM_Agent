@@ -1,69 +1,83 @@
 # DSNxBCT_LLM_Agent
 
-Download dataset from Kaggle:
-https://www.kaggle.com/datasets/adamamer2001/yelp-complete-open-dataset-2024
+LLM-powered User Modeling & Review Generation System for the DSN × BCT Data & AI Hackathon 3.0.
 
-Place files in:
-project/data/raw/
+---
 
+# 🧠 Overview
 
+This project builds a **user-aware LLM agent system** that learns from Yelp-style data and generates:
 
-.🧠 LLM Agent Hackathon — Task A (User Modeling & Review Generation)
-📌 Overview
+- ⭐ Personalized rating predictions  
+- ✍🏾 Realistic review text generation  
+- 👤 User behavior modeling  
+- 🌐 FastAPI-based inference service  
 
-This project is part of the DSN × BCT Data & AI Hackathon 3.0.
+It uses **local LLM inference via Ollama** to ensure offline, low-cost deployment.
 
-It builds a user-aware AI agent system that:
+---
 
-models user behavior from Yelp reviews
-predicts ratings for unseen businesses
-generates contextual review text
-exposes everything through a FastAPI service
-includes human-friendly testing endpoints for easy evaluation
-🚀 What This System Does
-👤 User Modeling
-Learns behavior from historical reviews
-Builds user profiles:
-average rating
-favorite categories
-reviewer style (strict / balanced / lenient)
-⭐ Review Generation
+# 🚀 Key Features
 
-Given a user and business, the system:
+## 👤 User Modeling
+Learns user behavior from historical reviews:
 
-predicts a rating
-generates a natural-language review
-adapts tone based on user behavior
-🌐 API Layer (FastAPI)
+- Average rating behavior
+- Favorite business categories
+- Reviewer style classification:
+  - strict reviewer
+  - balanced reviewer
+  - lenient reviewer
 
-Provides endpoints for:
+---
 
-structured testing (IDs)
-human-friendly testing (names)
-sample data discovery (for judges)
-🧱 System Architecture
+## ⭐ Review Generation (Task A)
+
+Given:
+- `user_id`
+- `business_id`
+
+The system:
+- Predicts rating (1–5)
+- Generates realistic review text
+- Adapts tone based on user personality
+
+---
+
+## 🌐 API Service (FastAPI)
+
+Fully container-ready REST API for evaluation and demo purposes.
+
+---
+
+# 🧱 System Architecture
+
 Yelp Dataset (raw JSON)
-        ↓
+↓
 Data Processing Layer
 (process_data.py)
-        ↓
-Structured CSV Data
-        ↓
+↓
+Processed CSV Data
+↓
 User Profiling Engine
 (user_profile.py)
-        ↓
-Review Generation Engine
+↓
+LLM Review Generator (Ollama)
 (review_generator.py)
-        ↓
+↓
 FastAPI Service Layer
 (app.py)
-📊 Dataset Used
 
-We use the Yelp Academic Dataset:
 
-review.json
-business.json
-user.json
+---
+
+# 📊 Dataset
+
+Yelp Academic Dataset:
+
+- review.json
+- business.json
+- user.json
 
 Processed into:
 
@@ -71,45 +85,48 @@ data/processed/
 ├── reviews.csv
 ├── businesses.csv
 └── users.csv
-⚙️ Core Components
-1. Data Processing
 
-File:
 
-data/process_data.py
-Purpose:
-Loads raw Yelp JSON files
-Samples dataset for efficiency
-Converts into structured CSV format
-2. User Profiling Engine
+---
 
-File:
+# ⚙️ Tech Stack
 
-models/user_profile.py
-Output:
-average rating behavior
-favorite categories
-user style classification:
-strict reviewer
-balanced reviewer
-lenient reviewer
-3. Review Generator
+- Python 3.10+
+- FastAPI
+- Pandas
+- Requests
+- Ollama (local LLM runtime)
+- llama3.2 / mistral models
 
-File:
+---
 
-models/review_generator.py
-Input:
-user_id
-business_id
-Output:
-predicted rating
-generated review text
-4. API Layer (FastAPI)
+# 🧠 LLM Setup
 
-File:
+This project uses **Ollama for local inference**:
 
-app.py
-🌐 API Endpoints
+### Install model
+```bash
+ollama pull llama3.2:1b
+
+or faster alternative:
+
+ollama pull mistral
+
+Start Ollama server
+
+ollama serve
+
+⚡ Performance Optimizations
+
+Recent improvements include:
+
+✅ Switched from phi3 → llama3.2:1b / mistral
+✅ Reduced prompt size for faster inference
+✅ Added request timeout controls
+✅ JSON parsing + fallback handling
+✅ Optional caching support (recommended for scale)
+✅ Lightweight persona-based prompting
+🧪 API Endpoints
 🔹 Health Check
 GET /
 🔹 Task A — Review Generation (ID-based)
@@ -128,29 +145,45 @@ Input:
 }
 🔹 User Profile
 POST /profile
-🔹 Sample Data (IMPORTANT FOR TESTING)
+🔹 Sample Data (IMPORTANT FOR JUDGES)
 GET /samples
+
 Returns:
+
 valid user IDs
-sample business names + IDs
+sample businesses
 🔹 Demo Input Generator
 GET /demo-input
-Returns:
 
-Ready-to-use test cases:
+Returns ready-to-use test cases.
 
-{
-  "user_id": "...",
-  "business_name": "..."
-}
+📁 Project Structure
+project/
+├── app.py
+├── data/
+│   ├── raw/
+│   ├── processed/
+│   └── process_data.py
+│
+├── models/
+│   ├── user_profile.py
+│   └── review_generator.py
+│
+├── retrieval/
+├── notebooks/
+├── prompts/
+├── requirements.txt
+└── README.md
 🧪 How to Run
 1. Install dependencies
 pip install -r requirements.txt
 2. Process dataset
 python data/process_data.py
-3. Run API server
+3. Start Ollama
+ollama serve
+4. Run API server
 uvicorn app:app --reload
-4. Open API documentation
+5. Open docs
 http://127.0.0.1:8000/docs
 🧪 How to Test
 Step 1 — Get valid inputs
@@ -159,30 +192,27 @@ GET /samples
 or
 
 GET /demo-input
-Step 2 — Use in API
-Example (ID-based):
+Step 2 — Run review generation
+Example
 POST /review
 {
   "user_id": "mh_-eMZ6K5RLWhZyISBhwA",
   "business_id": "abc123"
 }
-Example (Name-based):
-POST /review-by-name
-{
-  "user_name": "user_0",
-  "business_name": "Starbucks Coffee"
-}
-📁 Project Structure
-project/
-├── app.py
-├── data/
-│   ├── raw/
-│   ├── processed/
-│   └── process_data.py
-├── models/
-│   ├── user_profile.py
-│   └── review_generator.py
-├── notebooks/
-├── prompts/
-├── retrieval/
-└── requirements.txt
+🏆 Hackathon Highlights
+Real-world Yelp dataset
+LLM-powered personalization
+Behavioral user modeling
+FastAPI production-ready design
+Local inference (Ollama) for offline deployment
+Clean modular architecture
+🚀 Future Improvements
+Vector database (FAISS) for retrieval-augmented reasoning
+Async LLM inference (non-blocking API)
+Caching layer for repeated queries
+Multi-agent recommendation system (Task B)
+Dockerized deployment for judges
+👨🏾‍💻 Author
+
+Built for DSN × BCT Data & AI Hackathon 3.0
+Focus: LLM Agents, User Modeling, Recommendation Systems
