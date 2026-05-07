@@ -1,10 +1,20 @@
+import os
 import pandas as pd
 
-reviews = pd.read_csv("data/processed/reviews.csv")
-businesses = pd.read_csv("data/processed/businesses.csv")
+# resolve project root
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# merge for category access
+reviews_path = os.path.join(BASE_DIR, "data/processed/reviews.csv")
+businesses_path = os.path.join(BASE_DIR, "data/processed/businesses.csv")
+
+if not os.path.exists(reviews_path):
+    raise FileNotFoundError(f"Missing: {reviews_path}")
+
+reviews = pd.read_csv(reviews_path)
+businesses = pd.read_csv(businesses_path)
+
 data = reviews.merge(businesses, on="business_id")
+
 
 def build_user_profile(user_id):
 
@@ -32,7 +42,6 @@ def build_user_profile(user_id):
         .tolist()
     )
 
-    # simple behaviour classification
     if avg_rating <= 2.5:
         style = "strict reviewer"
     elif avg_rating >= 4:
@@ -46,3 +55,16 @@ def build_user_profile(user_id):
         "favorite_categories": categories,
         "style": style
     }
+
+
+if __name__ == "__main__":
+
+    df = pd.read_csv(reviews_path)
+
+    sample_user = df["user_id"].sample(1).values[0]
+
+    print("Testing user:", sample_user)
+
+    profile = build_user_profile(sample_user)
+
+    print(profile)
