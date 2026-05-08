@@ -147,15 +147,39 @@ def infer_traits(profile: dict):
 
 
 # -------------------------------------------------
-# 6. FINAL STEP 3 FIX (IMPORTANT)
+# 6. FINAL FLEXIBLE VERSION
 # -------------------------------------------------
-def build_behavior_profile(user_id):
+def build_behavior_profile(user_input, businesses=None):
 
-    user_reviews = reviews_df[reviews_df["user_id"] == user_id]
+    # CASE 1:
+    # user_input is a user_id string
+    if isinstance(user_input, str):
 
+        user_reviews = reviews_df[
+            reviews_df["user_id"] == user_input
+        ]
+
+        businesses = businesses_df
+
+    # CASE 2:
+    # user_input is already a dataframe
+    else:
+
+        user_reviews = user_input
+
+        if businesses is None:
+            businesses = businesses_df
+
+    # ---------------------------------------------
+    # Empty user fallback
+    # ---------------------------------------------
     if len(user_reviews) == 0:
+
         return {
-            "rating_behavior": {"avg_rating": 3.5, "strictness": 0.5},
+            "rating_behavior": {
+                "avg_rating": 3.5,
+                "strictness": 0.5
+            },
             "linguistic_style": {},
             "sentiment_profile": {},
             "behavioral_traits": {
@@ -167,9 +191,18 @@ def build_behavior_profile(user_id):
             }
         }
 
+    # ---------------------------------------------
+    # Build profile
+    # ---------------------------------------------
     rating_behavior = compute_rating_behavior(user_reviews)
-    category_bias = compute_category_bias(user_reviews, businesses_df)
+
+    category_bias = compute_category_bias(
+        user_reviews,
+        businesses
+    )
+
     linguistic_style = compute_linguistic_style(user_reviews)
+
     sentiment_profile = compute_sentiment_profile(user_reviews)
 
     profile = {
@@ -179,6 +212,7 @@ def build_behavior_profile(user_id):
     }
 
     profile["rating_behavior"]["category_bias"] = category_bias
+
     profile["behavioral_traits"] = infer_traits(profile)
 
     return profile
