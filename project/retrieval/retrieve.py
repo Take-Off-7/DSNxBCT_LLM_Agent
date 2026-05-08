@@ -15,87 +15,59 @@ from sentence_transformers import SentenceTransformer
 from models.behavior_model import build_behavior_profile
 from rag.response_generator import generate_response
 
-# -------------------------------------------------
-# Paths
-# -------------------------------------------------
-EMB_PATH = os.path.join(
-    BASE_DIR,
-    "data",
-    "embeddings",
-    "review_embeddings.npy"
-)
-
-META_PATH = os.path.join(
-    BASE_DIR,
-    "data",
-    "embeddings",
-    "reviews_with_ids.csv"
-)
-
-INDEX_PATH = os.path.join(
-    BASE_DIR,
-    "data",
-    "embeddings",
-    "faiss.index"
-)
-
-BUSINESS_PATH = os.path.join(
-    BASE_DIR,
-    "data",
-    "processed",
-    "businesses.csv"
-)
 
 # -------------------------------------------------
-# Load model + data
+# PATHS
+# -------------------------------------------------
+META_PATH = os.path.join(BASE_DIR, "data", "embeddings", "reviews_with_ids.csv")
+INDEX_PATH = os.path.join(BASE_DIR, "data", "embeddings", "faiss.index")
+BUSINESS_PATH = os.path.join(BASE_DIR, "data", "processed", "businesses.csv")
+
+
+# -------------------------------------------------
+# LOAD
 # -------------------------------------------------
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 df = pd.read_csv(META_PATH)
-embeddings = np.load(EMB_PATH)
-
 index = faiss.read_index(INDEX_PATH)
-
-# business metadata
 businesses = pd.read_csv(BUSINESS_PATH)
 
+
 # -------------------------------------------------
-# CORE: behavior-aware scoring
+# SAFE SCORING
 # -------------------------------------------------
 def compute_behavior_score(item, profile):
 
-    score = item["score"]
+    score = item.get("score", 0)
 
-    traits = profile["behavioral_traits"]
-    sentiment = profile["sentiment_profile"]
-    rating = profile["rating_behavior"]
+    traits = profile.get("behavioral_traits", {})
+    sentiment = profile.get("sentiment_profile", {})
+    rating = profile.get("rating_behavior", {})
 
-    # positive reviewer boost
     if traits.get("positive_reviewer"):
         score *= 1.05
 
-    # critical reviewer reduces positivity bias
     if traits.get("critical_reviewer"):
         score *= 0.95
 
-    # detail oriented users prefer longer reviews
     if traits.get("detail_oriented"):
         score *= 1.03
 
-    # strict users prefer higher quality signals
-    score *= (1 + rating["strictness"] * 0.02)
-
-    # sentiment alignment
-    score *= (1 + sentiment["avg_sentiment"] * 0.01)
+    score *= (1 + rating.get("strictness", 0) * 0.02)
+    score *= (1 + sentiment.get("avg_sentiment", 0) * 0.01)
 
     return score
 
 
 # -------------------------------------------------
-# MAIN RETRIEVE FUNCTION
+# MAIN RETRIEVE
 # -------------------------------------------------
 def retrieve(query, user_id=None, k=5, use_llm=True):
 
+    # -------------------------
+    # EMBEDDING SEARCH
+    # -------------------------
     query_emb = model.encode([query])
     query_emb = np.array(query_emb).astype("float32")
 
@@ -103,7 +75,16 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
 
     results = []
 
+    # -------------------------
+    # SAFE LOOP (FIXES CRASHES)
+    # -------------------------
+    if indices is None:
+        return []
+
     for idx, dist in zip(indices[0], distances[0]):
+
+        if idx is None or idx < 0 or idx >= len(df):
+            continue
 
         row = df.iloc[idx].to_dict()
 
@@ -115,47 +96,49 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
             "score": float(1 / (1 + dist))
         })
 
-    # -------------------------------------------------
-    # STEP 3: behavior reranking
-    # -------------------------------------------------
-    if user_id:
+    # -------------------------
+    # PROFILE RERANKING
+    # -------------------------
+    if user_id and len(results) > 0:
 
-        user_reviews = df[df["user_id"] == user_id]
+        try:
+            profile = build_behavior_profile(user_id)
 
-        profile = build_behavior_profile(
-            user_reviews,
-            businesses
-        )
+            for r in results:
+                r["score"] = compute_behavior_score(r, profile)
 
-        for r in results:
-            r["score"] = compute_behavior_score(r, profile)
+        except Exception as e:
+            print("Profile error:", e)
 
-    # final rerank
-    results = sorted(
-        results,
-        key=lambda x: x["score"],
-        reverse=True
-    )
-
+    results = sorted(results, key=lambda x: x["score"], reverse=True)
     top_results = results[:k]
 
-    # -------------------------------------------------
-    # STEP 4: LLM explanation layer
-    # -------------------------------------------------
+    # -------------------------
+    # LLM LAYER (SAFE WRAP)
+    # -------------------------
     if use_llm and user_id:
 
         try:
-            return generate_response(
-                query,
-                top_results,
-                user_id
-            )
+            llm_response = generate_response(query, top_results, user_id)
 
         except Exception as e:
-            print("\nOllama failed:", e)
-            print("Returning raw retrieval results...\n")
+            llm_response = {
+                "success": False,
+                "error": str(e)
+            }
 
-    return top_results
+        return {
+            "results": top_results,
+            "llm": llm_response
+        }
+
+    # -------------------------
+    # FALLBACK MODE
+    # -------------------------
+    return {
+        "results": top_results,
+        "llm": None
+    }
 
 
 # -------------------------------------------------
@@ -164,16 +147,8 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
 if __name__ == "__main__":
 
     test_query = "good food but slow service"
-
     test_user = df["user_id"].sample(1).values[0]
 
-    print("\nTesting user:", test_user)
+    output = retrieve(test_query, user_id=test_user, use_llm=False)
 
-    output = retrieve(
-        test_query,
-        user_id=test_user,
-        use_llm=True
-    )
-
-    print("\n")
     print(output)

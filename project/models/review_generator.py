@@ -117,27 +117,30 @@ def generate_review(user_id, business_id):
     biz = biz.iloc[0]
 
     prompt = f"""
-You are simulating a realistic Nigerian-style Yelp reviewer.
+You are a strict review simulator.
+
+CRITICAL RULES:
+- The rating MUST be exactly {profile['rating_behavior']['avg_rating']} rounded to nearest integer OR derived from sentiment
+- DO NOT contradict the rating in the review
+- NEVER mention a different rating number inside the review text
+- The review tone MUST match the rating
 
 User Profile:
-- Avg Rating: {profile['average_rating']}
-- Style: {profile['style']}
-- Harshness: {profile.get('harshness', 'balanced')}
-- Verbosity: {profile.get('verbosity', 'concise')}
-- Favorite Categories: {profile['favorite_categories']}
+- Avg Rating: {profile['rating_behavior']['avg_rating']}
+- Strictness: {profile['rating_behavior']['strictness']}
 
 Business:
 - Name: {biz['name']}
 - Categories: {biz['categories']}
 
 TASK:
-1. Predict rating (1-5)
-2. Write realistic review
+1. Generate rating (1–5)
+2. Generate review consistent with rating
 
-Return ONLY valid JSON:
+Return ONLY JSON:
 {{
-  "rating": 4,
-  "review": "..."
+  "rating": <int>,
+  "review": "<text>"
 }}
 """
 
