@@ -25,7 +25,7 @@ BUSINESS_PATH = os.path.join(BASE_DIR, "data", "processed", "businesses.csv")
 
 
 # -------------------------------------------------
-# LOAD
+# LOAD MODELS + DATA
 # -------------------------------------------------
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
@@ -33,9 +33,24 @@ df = pd.read_csv(META_PATH)
 index = faiss.read_index(INDEX_PATH)
 businesses = pd.read_csv(BUSINESS_PATH)
 
+# -------------------------------------------------
+# CLEAN BUSINESS IDS (IMPORTANT FIX)
+# -------------------------------------------------
+businesses["business_id"] = businesses["business_id"].astype(str).str.strip()
 
 # -------------------------------------------------
-# SAFE SCORING
+# BUSINESS LOOKUP MAP
+# -------------------------------------------------
+business_map = dict(
+    zip(
+        businesses["business_id"],
+        businesses["name"]
+    )
+)
+
+
+# -------------------------------------------------
+# SAFE SCORING FUNCTION
 # -------------------------------------------------
 def compute_behavior_score(item, profile):
 
@@ -61,7 +76,7 @@ def compute_behavior_score(item, profile):
 
 
 # -------------------------------------------------
-# MAIN RETRIEVE
+# MAIN RETRIEVE FUNCTION
 # -------------------------------------------------
 def retrieve(query, user_id=None, k=5, use_llm=True):
 
@@ -75,11 +90,8 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
 
     results = []
 
-    # -------------------------
-    # SAFE LOOP (FIXES CRASHES)
-    # -------------------------
     if indices is None:
-        return []
+        return {"results": [], "llm": None}
 
     for idx, dist in zip(indices[0], distances[0]):
 
@@ -87,10 +99,12 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
             continue
 
         row = df.iloc[idx].to_dict()
+        bid = str(row.get("business_id")).strip()
 
         results.append({
             "user_id": row.get("user_id"),
-            "business_id": row.get("business_id"),
+            "business_id": bid,
+            "business_name": business_map.get(bid, "Unknown"),
             "text": row.get("text"),
             "stars": row.get("stars"),
             "score": float(1 / (1 + dist))
@@ -114,7 +128,7 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
     top_results = results[:k]
 
     # -------------------------
-    # LLM LAYER (SAFE WRAP)
+    # LLM LAYER
     # -------------------------
     if use_llm and user_id:
 
