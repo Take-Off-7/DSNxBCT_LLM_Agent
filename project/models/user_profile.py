@@ -2,6 +2,24 @@ import os
 import numpy as np
 import pandas as pd
 
+import sys
+import os
+
+BASE_DIR = os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)
+
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+
+from models.behavior_model import (
+    compute_rating_behavior,
+    compute_category_bias,
+    compute_linguistic_style,
+    compute_sentiment_profile,
+    infer_traits
+)
+
 # -------------------------------------------------
 # Resolve project root
 # -------------------------------------------------
@@ -39,7 +57,7 @@ data = reviews.merge(
 )
 
 # -------------------------------------------------
-# USER PROFILE BUILDER
+# USER PROFILE BUILDER (STEP 2 UPGRADED)
 # -------------------------------------------------
 def build_user_profile(user_id):
 
@@ -48,96 +66,72 @@ def build_user_profile(user_id):
     ]
 
     # -------------------------------------------------
-    # Fallback profile
+    # Fallback (still upgraded to behavioral structure)
     # -------------------------------------------------
     if len(user_data) == 0:
 
         return {
             "user_id": user_id,
-            "average_rating": 3.5,
-            "rating_variance": 0.5,
-            "review_length_avg": 80,
-            "favorite_categories": [],
-            "style": "balanced reviewer",
-            "harshness": "unknown"
+
+            "rating_behavior": {
+                "avg_rating": 3.5,
+                "variance": 0.5,
+                "strictness": 0.5,
+                "category_bias": {}
+            },
+
+            "linguistic_style": {
+                "avg_review_length": 80,
+                "emoji_rate": 0.0,
+                "pidgin_usage": 0.0,
+                "formality": 0.5,
+                "verbosity": "concise"
+            },
+
+            "sentiment_profile": {
+                "avg_sentiment": 0.0,
+                "positivity_bias": 0.5,
+                "negativity_bias": 0.5
+            },
+
+            "behavioral_traits": {
+                "detail_oriented": False,
+                "price_sensitive": False,
+                "positive_reviewer": False,
+                "critical_reviewer": False,
+                "casual_style": False
+            }
         }
 
     # -------------------------------------------------
-    # BASIC STATS
+    # CORE BEHAVIORAL MODULES
     # -------------------------------------------------
-    avg_rating = user_data["stars"].mean()
-    rating_var = user_data["stars"].var()
+    rating_behavior = compute_rating_behavior(user_data)
 
-    # -------------------------------------------------
-    # CATEGORY PREFERENCES
-    # -------------------------------------------------
-    categories = (
-        user_data["categories"]
-        .dropna()
-        .str.split(",")
-        .explode()
-        .str.strip()
-        .value_counts()
-        .head(5)
-        .index
-        .tolist()
+    category_bias = compute_category_bias(
+        user_data,
+        businesses
     )
 
-    # -------------------------------------------------
-    # REVIEW STYLE SIGNALS
-    # -------------------------------------------------
-    review_lengths = user_data["text"].dropna().astype(str).apply(len)
+    linguistic_style = compute_linguistic_style(user_data)
 
-    avg_length = (
-        review_lengths.mean()
-        if len(review_lengths) > 0
-        else 80
-    )
+    sentiment_profile = compute_sentiment_profile(user_data)
 
-    # -------------------------------------------------
-    # SENTIMENT / STRICTNESS MODELING
-    # -------------------------------------------------
-    if avg_rating <= 2.5:
-        style = "strict reviewer"
-        harshness = "high"
-    elif avg_rating >= 4:
-        style = "lenient reviewer"
-        harshness = "low"
-    else:
-        style = "balanced reviewer"
-        harshness = "medium"
+    # attach category bias into rating behavior
+    rating_behavior["category_bias"] = category_bias
 
-    # -------------------------------------------------
-    # CONSISTENCY SCORE (important for realism)
-    # -------------------------------------------------
-    consistency = (
-        1 / (1 + (rating_var if not np.isnan(rating_var) else 0.5))
-    )
-
-    # -------------------------------------------------
-    # FINAL PROFILE
-    # -------------------------------------------------
-    return {
+    # full profile
+    profile = {
         "user_id": user_id,
-
-        # core signals
-        "average_rating": round(avg_rating, 2),
-        "rating_variance": round(
-            rating_var if not np.isnan(rating_var) else 0.5,
-            2
-        ),
-
-        # behavioral signals
-        "review_length_avg": int(avg_length),
-        "consistency_score": round(consistency, 3),
-
-        # preference signals
-        "favorite_categories": categories,
-
-        # persona signals
-        "style": style,
-        "harshness": harshness
+        "rating_behavior": rating_behavior,
+        "linguistic_style": linguistic_style,
+        "sentiment_profile": sentiment_profile
     }
+
+    # behavioral traits (derived layer)
+    profile["behavioral_traits"] = infer_traits(profile)
+
+    return profile
 
 # -------------------------------------------------
 # TEST
@@ -152,5 +146,6 @@ if __name__ == "__main__":
 
     profile = build_user_profile(sample_user)
 
-    print("\nPROFILE:\n")
-    print(profile)
+    print("\nBEHAVIORAL PROFILE:\n")
+    import json
+    print(json.dumps(profile, indent=2))

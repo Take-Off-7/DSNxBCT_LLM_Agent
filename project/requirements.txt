@@ -12,3 +12,4 @@ tqdm
 jupyter
 openai
 python-dotenv
+textblob
