@@ -4,10 +4,6 @@ import requests
 import pandas as pd
 import sys
 
-
-import sys
-import os
-
 BASE_DIR = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
 )
@@ -22,8 +18,8 @@ from dotenv import load_dotenv
 from models.user_profile import build_user_profile
 from models.review_generator import generate_review
 
-from project.retrieval.retrieve import retrieve
-from project.rag.response_generator import generate_response
+from retrieval.retrieve import retrieve
+from rag.response_generator import generate_response
 
 # -------------------------------------------------
 # ENV
@@ -76,11 +72,6 @@ class ReviewRequest(BaseModel):
     business_id: str
 
 
-class ReviewRequestByName(BaseModel):
-    user_name: str
-    business_name: str
-
-
 class ProfileRequest(BaseModel):
     user_id: str
 
@@ -110,9 +101,7 @@ import random
 
 @app.get("/samples")
 def samples():
-
     try:
-
         if reviews_df is None or businesses_df is None:
             load_data()
 
@@ -157,22 +146,23 @@ def review(req: ReviewRequest):
         return {"success": False, "error": str(e)}
 
 # -------------------------------------------------
-# 🔥 FIXED RAG ENDPOINT
+# ✅ FIXED RECOMMEND ENDPOINT
 # -------------------------------------------------
 @app.post("/recommend")
 def recommend(req: RecommendRequest):
 
     try:
-        # STEP 1: retrieve
+        # STEP 1: Retrieve results (NO LLM here)
         retrieved = retrieve(
             query=req.query,
-            user_id=req.user_id
+            user_id=req.user_id,
+            use_llm=False   # 🔥 IMPORTANT FIX
         )
 
-        # STEP 2: generate response (FIXED CALL)
+        # STEP 2: Generate response using ONLY results
         response = generate_response(
             req.query,
-            retrieved,
+            retrieved["results"],   # 🔥 CRITICAL FIX
             req.user_id
         )
 
@@ -180,7 +170,7 @@ def recommend(req: RecommendRequest):
             "success": True,
             "query": req.query,
             "user_id": req.user_id,
-            "retrieved": retrieved,
+            "retrieved": retrieved["results"],
             "response": response
         }
 

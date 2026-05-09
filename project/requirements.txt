@@ -13,3 +13,4 @@ jupyter
 openai
 python-dotenv
 textblob
+dotenv
