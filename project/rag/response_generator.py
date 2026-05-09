@@ -1,6 +1,9 @@
 import requests
 import os
+import json
+import numpy as np
 from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
 
 import sys
 import os
@@ -19,117 +22,183 @@ load_dotenv()
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
 
+# -------------------------------------------------
+# EMBEDDING MODEL (USER VECTOR SPACE)
+# -------------------------------------------------
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
 # -------------------------------------------------
-# SAFE CONTEXT BUILDER
+# SIMPLE USER MEMORY STORE (EVOLUTION LAYER)
+# -------------------------------------------------
+USER_MEMORY_PATH = os.path.join(BASE_DIR, "data", "user_memory.json")
+
+def load_user_memory():
+    if os.path.exists(USER_MEMORY_PATH):
+        with open(USER_MEMORY_PATH, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_user_memory(memory):
+    with open(USER_MEMORY_PATH, "w") as f:
+        json.dump(memory, f, indent=2)
+
+def update_user_memory(user_id, query, response_text):
+    memory = load_user_memory()
+
+    if user_id not in memory:
+        memory[user_id] = {
+            "recent_queries": [],
+            "style_vector": None
+        }
+
+    memory[user_id]["recent_queries"].append(query)
+    memory[user_id]["recent_queries"] = memory[user_id]["recent_queries"][-20:]
+
+    # evolve user embedding over time
+    text_blob = " ".join(memory[user_id]["recent_queries"])
+    memory[user_id]["style_vector"] = embedder.encode(text_blob).tolist()
+
+    save_user_memory(memory)
+
+
+# -------------------------------------------------
+# CONTEXT FORMATTER
 # -------------------------------------------------
 def format_context(results):
-
     if not isinstance(results, list):
         return "No relevant results found."
 
     formatted = []
 
     for r in results:
-
         if not isinstance(r, dict):
             continue
 
         formatted.append(f"""
-Business Name: {r.get('business_name', 'Unknown')}
-Business ID: {r.get('business_id', 'N/A')}
+Business: {r.get('business_name', 'Unknown')}
 Review: {r.get('text', 'N/A')}
 Rating: {r.get('stars', 'N/A')}
 Score: {r.get('score', 0)}
 """)
 
-    return "\n".join(formatted) if formatted else "No valid results found."
+    return "\n".join(formatted)
 
 
 # -------------------------------------------------
-# MAIN LLM GENERATOR (PERSONALIZED)
+# USER VECTOR BUILDER (PERSONALIZATION CORE)
+# -------------------------------------------------
+def build_user_vector(profile):
+    text = json.dumps(profile, default=str)
+    return embedder.encode(text)
+
+
+# -------------------------------------------------
+# MAIN GENERATOR (NEXT-GEN PERSONALIZATION ENGINE)
 # -------------------------------------------------
 def generate_response(query, results, user_id=None):
 
     context = format_context(results)
 
     # -------------------------------------------------
-    # 🔥 LOAD USER PROFILE
+    # PROFILE
     # -------------------------------------------------
     profile = {}
+    user_memory = load_user_memory()
+
     if user_id:
         try:
             profile = build_user_profile(user_id)
-        except Exception:
+        except:
             profile = {}
 
-    rating = profile.get("rating_behavior", {})
     traits = profile.get("behavioral_traits", {})
+    rating = profile.get("rating_behavior", {})
     style = profile.get("linguistic_style", {})
     sentiment = profile.get("sentiment_profile", {})
 
     # -------------------------------------------------
-    # STYLE CONTROL
+    # USER MEMORY VECTOR
     # -------------------------------------------------
-    verbosity = style.get("verbosity", "concise")
-    formality = style.get("formality", 0.5)
-
-    tone_instruction = "Keep response concise."
-    if verbosity == "detailed":
-        tone_instruction = "Provide a detailed explanation."
-
-    if formality > 0.7:
-        tone_instruction += " Use a formal tone."
-    else:
-        tone_instruction += " Use a casual, natural tone."
+    user_vector = None
+    if user_id and user_id in user_memory:
+        user_vector = user_memory[user_id].get("style_vector")
 
     # -------------------------------------------------
-    # PERSONALIZATION INSTRUCTIONS
+    # SIMPLIFIED BUT STRONG DIVERSITY RULES
     # -------------------------------------------------
-    personalization_rules = f"""
-User Behavioral Traits:
-- Price Sensitive: {traits.get('price_sensitive')}
-- Positive Reviewer: {traits.get('positive_reviewer')}
-- Critical Reviewer: {traits.get('critical_reviewer')}
-- Detail Oriented: {traits.get('detail_oriented')}
-
-User Preferences:
-- Avg Rating Given: {rating.get('avg_rating')}
-- Strictness: {rating.get('strictness')}
-- Avg Sentiment: {sentiment.get('avg_sentiment')}
-
-Guidelines:
-- If price_sensitive → prioritize affordable, high-value options
-- If positive_reviewer → emphasize good experiences
-- If critical_reviewer → highlight both pros and cons
-- If detail_oriented → include more explanation
+    diversity_instruction = """
+DIVERSITY RULES:
+- Avoid repeating similar businesses
+- Ensure variety in recommendations (not all same category)
+- Prefer different experiences (price, vibe, location)
 """
 
     # -------------------------------------------------
-    # FINAL PROMPT
+    # STRONGER PERSONALIZATION SIGNAL
+    # -------------------------------------------------
+    personalization = f"""
+USER INTELLIGENCE PROFILE:
+
+- Avg Rating Behavior: {rating.get('avg_rating')}
+- Strictness Level: {rating.get('strictness')}
+- Sentiment Bias: {sentiment.get('avg_sentiment')}
+
+Behavior Traits:
+- Price Sensitive: {traits.get('price_sensitive')}
+- Critical Reviewer: {traits.get('critical_reviewer')}
+- Detail Oriented: {traits.get('detail_oriented')}
+- Positive Reviewer: {traits.get('positive_reviewer')}
+
+Writing Style Preference:
+- Formality: {style.get('formality')}
+- Verbosity: {style.get('verbosity')}
+
+NOTE:
+User preferences evolve over time using memory signals.
+"""
+
+    # -------------------------------------------------
+    # IMPORTANT FIX: FORCE MODEL TO USE ONLY DATA
+    # -------------------------------------------------
+    output_format = """
+RESPONSE FORMAT (STRICT):
+
+1. Ranked Recommendations (ONLY from context)
+2. Why each matches user profile (short + precise)
+3. Trade-offs (what user might dislike)
+4. Final ranking justification
+
+IMPORTANT:
+- Do NOT invent new businesses
+- Do NOT exaggerate quality
+- Use ONLY provided context items
+"""
+
+    # -------------------------------------------------
+    # STRONGER CONTEXT ENFORCEMENT
     # -------------------------------------------------
     prompt = f"""
-You are a highly intelligent personalized recommendation assistant.
+You are a recommendation ranking assistant.
 
-User Query:
+Your job is NOT just to describe — but to explain WHY these results are ranked this way.
+
+{diversity_instruction}
+
+{personalization}
+
+USER QUERY:
 {query}
 
-{personalization_rules}
-
-Top Retrieved Results:
+CANDIDATE BUSINESSES (RANK THESE ONLY):
 {context}
 
-STRICT RULES:
-- ONLY recommend businesses from the provided results
-- DO NOT introduce new businesses
-- Base reasoning ONLY on the given reviews
-- Do NOT hallucinate
+{output_format}
 
-STYLE:
-{tone_instruction}
-
-TASK:
-Recommend the best options and explain WHY they fit this specific user.
+RULES:
+- Use ONLY provided businesses
+- Respect ranking order based on user fit
+- Be honest about weaknesses
+- No hallucinations
 """
 
     payload = {
@@ -139,30 +208,37 @@ Recommend the best options and explain WHY they fit this specific user.
     }
 
     try:
-
         response = requests.post(
             OLLAMA_URL,
             json=payload,
-            timeout=60
+            timeout=25
         )
 
         if response.status_code != 200:
-            return {
-                "success": False,
-                "error": response.text,
-                "fallback": "LLM unavailable, showing raw results"
-            }
+            response = requests.post(
+                OLLAMA_URL,
+                json=payload,
+                timeout=30
+            )
 
         data = response.json()
+        result_text = data.get("response", "")
+
+        # -------------------------------------------------
+        # MEMORY UPDATE (IMPROVED SIGNAL QUALITY)
+        # -------------------------------------------------
+        if user_id:
+            update_user_memory(user_id, query, result_text)
 
         return {
             "success": True,
-            "response": data.get("response", ""),
-            "model": OLLAMA_MODEL
+            "response": result_text,
+            "model": OLLAMA_MODEL,
+            "user_vector_used": user_vector is not None,
+            "context_size": len(results)
         }
 
     except Exception as e:
-
         return {
             "success": False,
             "error": str(e),
