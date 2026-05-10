@@ -4,11 +4,15 @@ import requests
 import pandas as pd
 import sys
 import traceback
-from fastapi import FastAPI, HTTPException
+
+from fastapi import FastAPI
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# -------------------------------------------------
+# BASE PATH (FIXED FOR ALL ENVIRONMENTS)
+# -------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.append(BASE_DIR)
 
@@ -30,14 +34,13 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
 # -------------------------------------------------
 app = FastAPI(
     title="LLM Agent Hackathon API (Production Upgrade)",
-    description="User Modeling + Review Generation + RAG System",
+    description="User Modeling + Review Generation + Agentic Recommendation System",
     version="2.0.0"
 )
 
 # -------------------------------------------------
-# DATA CACHE
+# DATA PATHS (ROBUST)
 # -------------------------------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data", "processed")
 
 reviews_df = None
@@ -45,13 +48,33 @@ businesses_df = None
 
 
 def load_data():
+    """
+    Robust loader with clear fallback logging
+    """
     global reviews_df, businesses_df
 
-    if reviews_df is None:
-        reviews_df = pd.read_csv(os.path.join(DATA_DIR, "reviews.csv"))
+    try:
+        reviews_path = os.path.join(DATA_DIR, "reviews.csv")
+        business_path = os.path.join(DATA_DIR, "businesses.csv")
 
-    if businesses_df is None:
-        businesses_df = pd.read_csv(os.path.join(DATA_DIR, "businesses.csv"))
+        print("🔍 Looking for data in:", DATA_DIR)
+
+        if os.path.exists(reviews_path):
+            reviews_df = pd.read_csv(reviews_path)
+            print("✅ Loaded reviews.csv")
+
+        else:
+            print("⚠️ Missing reviews.csv at:", reviews_path)
+
+        if os.path.exists(business_path):
+            businesses_df = pd.read_csv(business_path)
+            print("✅ Loaded businesses.csv")
+
+        else:
+            print("⚠️ Missing businesses.csv at:", business_path)
+
+    except Exception as e:
+        print("❌ DATA LOAD ERROR:", str(e))
 
 
 @app.on_event("startup")
@@ -75,7 +98,7 @@ class RecommendRequest(BaseModel):
     user_id: str
 
 # -------------------------------------------------
-# SAFE RESPONSE WRAPPER
+# RESPONSE WRAPPER
 # -------------------------------------------------
 def safe_response(success=True, data=None, error=None):
     return {
@@ -91,23 +114,25 @@ def safe_response(success=True, data=None, error=None):
 def home():
     return safe_response(data={
         "message": "LLM Agent API Running ✔",
-        "features": [
-            "Personalized User Modeling",
-            "Review Simulation",
-            "RAG Recommendation Engine"
-        ]
+        "architecture": "Agentic Retrieval + User Modeling + RAG",
+        "version": "2.0.0"
     })
 
 # -------------------------------------------------
-# SAMPLES
+# SAMPLES (FIXED DATA ISSUE)
 # -------------------------------------------------
 @app.get("/samples")
 def samples():
     try:
-        if reviews_df is None or businesses_df is None:
-            load_data()
+        load_data()
 
         import random
+
+        if reviews_df is None or businesses_df is None:
+            return safe_response(
+                success=False,
+                error="Data not loaded. Check /data/processed folder."
+            )
 
         random_user = random.choice(reviews_df["user_id"].tolist())
         random_business = businesses_df.sample(1).iloc[0]
@@ -129,89 +154,75 @@ def samples():
 @app.post("/profile")
 def profile(req: ProfileRequest):
     try:
-        profile = build_user_profile(req.user_id)
-        return safe_response(data=profile)
+        return safe_response(data=build_user_profile(req.user_id))
     except Exception as e:
         return safe_response(success=False, error=str(e))
 
 # -------------------------------------------------
-# REVIEW (SAFE + TIMEOUT PROTECTED)
+# REVIEW
 # -------------------------------------------------
 @app.post("/review")
 def review(req: ReviewRequest):
     try:
         result = generate_review(req.user_id, req.business_id)
-
         return safe_response(data=result)
-
     except Exception as e:
         return safe_response(success=False, error=str(e))
 
 # -------------------------------------------------
-# RECOMMEND (FULLY STABILIZED PIPELINE)
+# RECOMMEND (CLEAN AGENT PIPELINE)
 # -------------------------------------------------
 @app.post("/recommend")
 def recommend(req: RecommendRequest):
 
     try:
-        # STEP 1: retrieval (base candidates)
+        # STEP 1: retrieval (ONLY ranking layer)
         retrieved = retrieve(
             query=req.query,
             user_id=req.user_id,
+            k=5,
             use_llm=False
         )
 
-        results = retrieved["results"]
+        results = retrieved.get("results", [])
 
-        # STEP 2: load user profile for personalization
-        profile = build_user_profile(req.user_id)
+        if not results:
+            return safe_response(data={
+                "query": req.query,
+                "user_id": req.user_id,
+                "recommendations": [],
+                "ai_response": {
+                    "success": False,
+                    "response": "No results found"
+                }
+            })
 
-        avg_rating = profile.get("rating_behavior", {}).get("avg_rating", 3)
-        strictness = profile.get("rating_behavior", {}).get("strictness", 0.5)
-        sentiment = profile.get("sentiment_profile", {}).get("avg_sentiment", 0)
-
-        # STEP 3: USER-AWARE RE-RANKING (🔥 FIX)
-        for r in results:
-            stars = r.get("stars", 3)
-
-            # base score
-            score = r.get("score", 0)
-
-            # penalize mismatch with user taste
-            rating_gap = abs(stars - avg_rating)
-
-            penalty = (
-                rating_gap * 0.15 +        # mismatch penalty
-                strictness * 0.10          # strict users are harder to please
-            )
-
-            # boost good sentiment alignment
-            if sentiment > 0:
-                score += 0.05
-
-            r["score"] = score - penalty
-
-        # STEP 4: sort after rerank
-        results = sorted(results, key=lambda x: x["score"], reverse=True)
-
-        # STEP 5: LLM explanation (optional, safe fallback)
+        # STEP 2: user context (NOT scoring)
         try:
-            response = generate_response(
+            profile = build_user_profile(req.user_id)
+        except:
+            profile = {}
+
+        # STEP 3: LLM reasoning layer (explanation only)
+        try:
+            ai_response = generate_response(
                 req.query,
                 results,
                 req.user_id
             )
-        except Exception:
-            response = {
+        except Exception as e:
+            ai_response = {
                 "success": False,
-                "response": "Fallback mode: showing ranked results without AI explanation."
+                "response": "LLM fallback mode - ranked results only",
+                "error": str(e)
             }
 
         return safe_response(data={
             "query": req.query,
             "user_id": req.user_id,
             "recommendations": results,
-            "ai_response": response
+            "ai_response": ai_response,
+            "profile_loaded": bool(profile)
         })
 
     except Exception as e:
@@ -222,51 +233,35 @@ def recommend(req: RecommendRequest):
         )
 
 # -------------------------------------------------
-# LLM STATUS (HEALTH CHECK)
+# LLM STATUS
 # -------------------------------------------------
 @app.get("/llm-status")
 def llm_status():
 
     try:
-        r = requests.get(
-            "http://localhost:11434/api/tags",
-            timeout=5
-        )
+        r = requests.get("http://localhost:11434/api/tags", timeout=5)
 
         if r.status_code != 200:
             return safe_response(data={
                 "status": "unhealthy",
-                "ollama_running": False,
-                "reason": "Ollama API not responding"
+                "ollama_running": False
             })
 
-        models = r.json()
+        models = r.json().get("models", [])
+        model_list = [m.get("name") for m in models]
 
-        # check if expected model exists
-        model_list = []
-        for m in models.get("models", []):
-            model_list.append(m.get("name"))
-
-        is_model_available = OLLAMA_MODEL in model_list
+        is_ready = OLLAMA_MODEL in model_list
 
         return safe_response(data={
-            "status": "healthy" if is_model_available else "degraded",
+            "status": "healthy" if is_ready else "degraded",
             "ollama_running": True,
-            "model_loaded": is_model_available,
+            "model_loaded": is_ready,
             "expected_model": OLLAMA_MODEL,
             "available_models": model_list
-        })
-
-    except requests.exceptions.Timeout:
-        return safe_response(data={
-            "status": "unhealthy",
-            "ollama_running": False,
-            "reason": "timeout connecting to Ollama"
         })
 
     except Exception as e:
         return safe_response(data={
             "status": "unhealthy",
-            "ollama_running": False,
             "error": str(e)
         })

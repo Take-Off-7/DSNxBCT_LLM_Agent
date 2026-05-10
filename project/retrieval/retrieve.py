@@ -5,9 +5,7 @@ import pandas as pd
 import faiss
 from sentence_transformers import SentenceTransformer
 
-BASE_DIR = os.path.dirname(
-    os.path.dirname(os.path.abspath(__file__))
-)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 if BASE_DIR not in sys.path:
     sys.path.append(BASE_DIR)
@@ -20,7 +18,7 @@ from models.user_profile import build_user_profile
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # -------------------------------------------------
-# PATHS
+# DATA
 # -------------------------------------------------
 META_PATH = os.path.join(BASE_DIR, "data", "embeddings", "reviews_with_ids.csv")
 INDEX_PATH = os.path.join(BASE_DIR, "data", "embeddings", "faiss.index")
@@ -31,18 +29,42 @@ index = faiss.read_index(INDEX_PATH)
 businesses = pd.read_csv(BUSINESS_PATH)
 
 businesses["business_id"] = businesses["business_id"].astype(str).str.strip()
+
 business_map = dict(zip(businesses["business_id"], businesses["name"]))
+business_cat_map = dict(
+    zip(
+        businesses["business_id"],
+        businesses["categories"].fillna("").str.lower()
+    )
+)
+
+# -------------------------------------------------
+# SAFE UTIL
+# -------------------------------------------------
+def safe_float(x):
+    try:
+        return float(x)
+    except:
+        return 0.0
+
+
+def l2norm(v):
+    return v / (np.linalg.norm(v) + 1e-8)
 
 
 # -------------------------------------------------
-# BASE SCORE
+# SCORE HELPERS
 # -------------------------------------------------
 def base_score(dist):
-    return float(1 / (1 + dist))
+    return 1 / (1 + dist)
+
+
+def cosine(a, b):
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
 
 
 # -------------------------------------------------
-# USER VECTOR
+# USER VECTOR (STRUCTURED SIGNAL ONLY)
 # -------------------------------------------------
 def build_user_vector(profile):
 
@@ -51,59 +73,146 @@ def build_user_vector(profile):
     sentiment = profile.get("sentiment_profile", {})
 
     vec = np.array([
-        rating.get("avg_rating", 3),
-        rating.get("strictness", 0.5),
-        sentiment.get("avg_sentiment", 0),
+        safe_float(rating.get("avg_rating", 3)),
+        safe_float(rating.get("strictness", 0.5)),
+        safe_float(rating.get("variance", 0.5)),
+        safe_float(sentiment.get("avg_sentiment", 0)),
         float(traits.get("positive_reviewer", False)),
         float(traits.get("critical_reviewer", False)),
         float(traits.get("detail_oriented", False))
-    ])
+    ], dtype=np.float32)
 
-    return vec / (np.linalg.norm(vec) + 1e-8)
+    return l2norm(vec)
 
 
 # -------------------------------------------------
-# USER SCORING (FIXED STABILITY)
+# ITEM EMBEDDING
+# -------------------------------------------------
+def embed_item(text: str):
+    return l2norm(model.encode([str(text)])[0])
+
+
+# -------------------------------------------------
+# PERSONALITY SCORE
 # -------------------------------------------------
 def compute_user_score(item, profile):
 
-    score = item["score"]
+    score = safe_float(item.get("score", 0))
 
     traits = profile.get("behavioral_traits", {})
     sentiment = profile.get("sentiment_profile", {})
     rating = profile.get("rating_behavior", {})
 
-    strictness = rating.get("strictness", 0.5)
-    avg_rating = rating.get("avg_rating", 3)
+    rating_gap = abs(
+        safe_float(item.get("stars", 3)) -
+        safe_float(rating.get("avg_rating", 3))
+    )
 
-    # rating alignment penalty (IMPORTANT FIX)
-    rating_gap = abs(item.get("stars", 3) - avg_rating)
-    score -= rating_gap * 0.12
-
-    # behavioral modifiers
-    score *= (1 + strictness * 0.20)
-    score *= (1 + sentiment.get("avg_sentiment", 0) * 0.10)
+    score *= (1 - rating_gap * 0.20)
+    score *= (1 + safe_float(rating.get("strictness", 0.5)) * 0.25)
+    score *= (1 + safe_float(sentiment.get("avg_sentiment", 0)) * 0.15)
 
     if traits.get("positive_reviewer"):
-        score *= 1.03
-
+        score *= 1.08
     if traits.get("critical_reviewer"):
-        score *= 0.92
-
+        score *= 0.85
     if traits.get("detail_oriented"):
-        score *= 1.05
+        score *= 1.10
 
-    return score
+    return float(score)
 
 
 # -------------------------------------------------
-# MAIN RETRIEVE ENGINE (IMPROVED)
+# CATEGORY BOOST
+# -------------------------------------------------
+def category_boost(category, profile):
+
+    if not category:
+        return 1.0
+
+    category = category.lower()
+
+    traits = profile.get("behavioral_traits", {})
+    rating = profile.get("rating_behavior", {})
+
+    boost = 1.0
+
+    if rating.get("strictness", 0) > 0.65:
+        if "restaurant" in category or "hotel" in category:
+            boost += 0.06
+
+    if traits.get("detail_oriented"):
+        if "luxury" in category or "spa" in category:
+            boost += 0.10
+
+    if traits.get("positive_reviewer"):
+        if "bar" in category or "restaurant" in category:
+            boost += 0.06
+
+    return boost
+
+
+# -------------------------------------------------
+# DIVERSITY (SAFE MMR)
+# -------------------------------------------------
+def diversify(results, k):
+
+    if not results:
+        return []
+
+    selected = []
+    candidates = results.copy()
+
+    while len(selected) < k and candidates:
+
+        best = None
+        best_score = -1
+
+        for c in candidates:
+
+            relevance = c["score"]
+
+            if not selected:
+                diversity_penalty = 0
+            else:
+                diversity_penalty = max(
+                    cosine(c["vec"], s["vec"])
+                    for s in selected
+                )
+
+            mmr = 0.75 * relevance - 0.25 * diversity_penalty
+
+            if mmr > best_score:
+                best_score = mmr
+                best = c
+
+        selected.append(best)
+        candidates.remove(best)
+
+    return selected
+
+
+# -------------------------------------------------
+# MAIN RETRIEVE (FIXED + CLEAN)
 # -------------------------------------------------
 def retrieve(query, user_id=None, k=5, use_llm=True):
 
-    query_emb = model.encode([query]).astype("float32")
+    query_emb = embed_item(query)
 
-    distances, indices = index.search(query_emb, k * 20)
+    profile = None
+    user_vec = None
+
+    if user_id:
+        try:
+            profile = build_user_profile(user_id)
+            user_vec = build_user_vector(profile)
+        except:
+            profile = None
+
+    # -------------------------------------------------
+    # FAISS SEARCH
+    # -------------------------------------------------
+    distances, indices = index.search(query_emb.reshape(1, -1), k * 30)
 
     results = []
 
@@ -115,78 +224,64 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
         row = df.iloc[idx]
         bid = str(row.get("business_id", "")).strip()
 
+        category = business_cat_map.get(bid, "")
+
+        review_score = base_score(float(dist))
+
+        text = str(row.get("text", ""))
+        item_vec = embed_item(text)
+
+        semantic_alignment = cosine(query_emb, item_vec)
+
+        score = review_score + semantic_alignment * 0.30
+
         results.append({
             "business_id": bid,
             "business_name": business_map.get(bid, "Unknown"),
-            "text": row.get("text", ""),
-            "stars": float(row.get("stars", 0)),
-            "score": base_score(dist)
+            "category": category,
+            "text": text,
+            "stars": safe_float(row.get("stars", 0)),
+            "score": float(score),
+            "vec": item_vec
         })
 
     # -------------------------------------------------
-    # PERSONALIZATION LAYER (FIXED)
+    # PERSONALIZATION
     # -------------------------------------------------
-    profile = None
-    user_vec = None
+    if profile and user_vec is not None:
 
-    if user_id:
-        try:
-            profile = build_user_profile(user_id)
-            user_vec = build_user_vector(profile)
+        for r in results:
 
-            for r in results:
+            r["score"] = (
+                compute_user_score(r, profile) * 0.70 +
+                r["score"] * 0.30
+            )
 
-                # core personalization
-                r["score"] = compute_user_score(r, profile)
+            r["score"] += cosine(user_vec, r["vec"]) * 0.15
 
-                # semantic alignment boost (stabilized)
-                item_vec = model.encode([r["text"]])[0]
-                item_vec = item_vec / (np.linalg.norm(item_vec) + 1e-8)
-
-                similarity = np.dot(user_vec, item_vec)
-
-                r["score"] += similarity * 0.12
-
-        except Exception as e:
-            print("Profile error:", e)
+            r["score"] *= category_boost(r.get("category", ""), profile)
 
     # -------------------------------------------------
-    # FINAL SORT
+    # FINAL RANKING
     # -------------------------------------------------
-    results = sorted(results, key=lambda x: x["score"], reverse=True)
+    results.sort(key=lambda x: x["score"], reverse=True)
+
+    final = diversify(results, k)
 
     # -------------------------------------------------
-    # IMPROVED DIVERSITY (FIXED BUGGY LOGIC)
+    # CLEAN OUTPUT (NO VECTORS)
     # -------------------------------------------------
-    final = []
-    seen_business = set()
-    seen_prefix = set()
-
-    for r in results:
-
-        bid = r["business_id"]
-        prefix = r["business_name"].split()[0].lower()
-
-        # avoid duplicates
-        if bid in seen_business:
-            continue
-
-        # avoid over-clustering same category
-        if prefix in seen_prefix and len(final) >= k:
-            continue
-
-        seen_business.add(bid)
-        seen_prefix.add(prefix)
-
-        final.append(r)
-
-        if len(final) >= k:
-            break
-
-    if len(final) < k:
-        final = results[:k]
-
     return {
-        "results": final,
-        "raw_ranked": results
+        "query": str(query),
+        "results": [
+            {
+                "business_id": str(r["business_id"]),
+                "business_name": str(r["business_name"]),
+                "category": str(r["category"]),
+                "text": str(r["text"]),
+                "stars": float(r["stars"]),
+                "score": float(r["score"])
+            }
+            for r in final
+        ]
     }

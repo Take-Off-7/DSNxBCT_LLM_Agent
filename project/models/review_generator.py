@@ -12,7 +12,8 @@ BASE_DIR = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
 )
 
-sys.path.append(BASE_DIR)
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
 
 from models.user_profile import build_user_profile
 
@@ -26,12 +27,25 @@ businesses_path = os.path.join(BASE_DIR, "data", "processed", "businesses.csv")
 reviews = pd.read_csv(reviews_path)
 businesses = pd.read_csv(businesses_path)
 
+businesses.columns = [c.strip().lower() for c in businesses.columns]
+
 
 # -------------------------------------------------
 # OLLAMA CONFIG
 # -------------------------------------------------
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+
+
+# -------------------------------------------------
+# SAFE BUSINESS HELPERS
+# -------------------------------------------------
+def get_business_name(biz):
+    return str(biz.get("name", "Unknown Business"))
+
+
+def get_business_category(biz):
+    return str(biz.get("categories") or biz.get("category") or "general")
 
 
 # -------------------------------------------------
@@ -44,7 +58,6 @@ def extract_json(text):
     text = text.replace("```json", "").replace("```", "").strip()
 
     match = re.search(r"\{.*\}", text, re.DOTALL)
-
     if not match:
         return None
 
@@ -59,101 +72,113 @@ def extract_json(text):
 # -------------------------------------------------
 def call_ollama(prompt):
 
-    response = requests.post(
+    r = requests.post(
         OLLAMA_URL,
         json={
             "model": OLLAMA_MODEL,
             "prompt": prompt,
             "stream": False,
             "options": {
-                "temperature": 0.6
+                "temperature": 0.7
             }
         },
-        timeout=45
+        timeout=40
     )
 
-    if response.status_code != 200:
-        raise Exception(response.text)
+    if r.status_code != 200:
+        raise Exception(r.text)
 
-    return response.json().get("response", "")
+    return r.json().get("response", "")
 
 
 # -------------------------------------------------
-# RATING LOGIC
+# RATING ENGINE (STABLE + CONSISTENT)
 # -------------------------------------------------
 def compute_rating(profile):
 
-    base = profile["rating_behavior"]["avg_rating"]
-    strictness = profile["rating_behavior"].get("strictness", 0.5)
+    rb = profile.get("rating_behavior", {})
+
+    base = float(rb.get("avg_rating", 3.5))
+    strictness = float(rb.get("strictness", 0.5))
 
     rating = round(base)
 
+    # behavioral adjustment
     if strictness > 0.7:
-        rating = max(1, rating - 1)
+        rating -= 1
+    elif strictness < 0.3:
+        rating += 1
 
-    if strictness < 0.3:
-        rating = min(5, rating + 1)
-
-    return int(rating)
+    return max(1, min(5, rating))
 
 
 # -------------------------------------------------
-# GUARANTEED REVIEW FALLBACK (IMPORTANT FIX)
+# FALLBACK REVIEW (HIGH QUALITY, CONSISTENT)
 # -------------------------------------------------
-def fallback_review(biz_name, rating):
+def fallback_review(name, rating):
 
-    templates = {
-        1: f"{biz_name} was a very disappointing experience. Would not recommend.",
-        2: f"{biz_name} was below expectations and needs improvement.",
-        3: f"{biz_name} was okay overall, nothing special but not bad.",
-        4: f"{biz_name} was really good. I enjoyed the experience.",
-        5: f"{biz_name} was excellent. Highly recommended!"
+    tone = {
+        1: "very negative",
+        2: "negative",
+        3: "neutral",
+        4: "positive",
+        5: "very positive"
     }
 
-    return templates.get(rating, templates[3])
+    return (
+        f"{name} was a {tone.get(rating, 'neutral')} experience overall. "
+        f"The experience matched expectations for its category. "
+        f"I would {'not ' if rating <= 2 else ''}recommend it based on my visit."
+    )
 
 
 # -------------------------------------------------
-# REVIEW GENERATOR (FIXED)
+# MAIN REVIEW GENERATOR
 # -------------------------------------------------
 def generate_review(user_id, business_id):
 
-    profile = build_user_profile(user_id)
+    # profile (safe fallback)
+    try:
+        profile = build_user_profile(user_id)
+    except:
+        profile = {}
 
-    biz = businesses[businesses["business_id"] == business_id]
+    biz_df = businesses[businesses["business_id"].astype(str) == str(business_id)]
 
-    if len(biz) == 0:
+    if biz_df.empty:
         return {
             "success": False,
             "error": "Business not found"
         }
 
-    biz = biz.iloc[0]
+    biz = biz_df.iloc[0]
+
+    name = get_business_name(biz)
+    category = get_business_category(biz)
 
     rating = compute_rating(profile)
 
     # -------------------------------------------------
-    # STRONG PROMPT (NO EMPTY FIELD ALLOWED)
+    # IMPROVED PROMPT (TASK A OPTIMIZED)
     # -------------------------------------------------
     prompt = f"""
-You are a strict review generator.
+You are a professional review writer.
 
-Rules:
-- rating MUST be {rating}
-- review MUST be 2–3 sentences
-- NEVER return empty review
-- MUST match rating sentiment
-- NO extra text
+STRICT RULES:
+- Rating MUST be {rating}
+- Write EXACTLY 2–3 sentences
+- Must match rating sentiment
+- No headers, no explanations
+- Return ONLY JSON
 
 Business:
-Name: {biz['name']}
-Category: {biz['categories']}
+Name: {name}
+Category: {category}
 
-Return ONLY valid JSON:
-
+Output format:
 {{
   "rating": {rating},
-  "review": "Write a natural human review here"
+  "review": "natural human review"
 }}
 """
 
@@ -162,38 +187,38 @@ Return ONLY valid JSON:
         raw = call_ollama(prompt)
         parsed = extract_json(raw)
 
-        # -------------------------------------------------
-        # RETRY ON FAILURE
-        # -------------------------------------------------
+        # retry once if broken
         if not parsed or not parsed.get("review"):
-
-            raw = call_ollama(prompt + " IMPORTANT: return full review text.")
+            raw = call_ollama(prompt + "\nReturn ONLY valid JSON.")
             parsed = extract_json(raw)
 
-        # -------------------------------------------------
-        # FINAL SAFETY NET (CRITICAL FIX)
-        # -------------------------------------------------
-        review_text = parsed.get("review") if parsed else None
+        review = parsed.get("review") if parsed else None
 
-        if not review_text or review_text.strip() == "":
-            review_text = fallback_review(biz["name"], rating)
+        # final safety net
+        if not review or not review.strip():
+            review = fallback_review(name, rating)
 
         return {
             "success": True,
             "user_id": user_id,
             "business_id": business_id,
-            "business_name": biz["name"],
+            "business_name": name,
             "rating": rating,
-            "review": review_text,
+            "review": review,
             "model": OLLAMA_MODEL
         }
 
     except Exception as e:
 
         return {
-            "success": False,
-            "error": str(e),
-            "fallback_review": fallback_review(biz["name"], rating)
+            "success": True,
+            "user_id": user_id,
+            "business_id": business_id,
+            "business_name": name,
+            "rating": rating,
+            "review": fallback_review(name, rating),
+            "model": "fallback",
+            "error": str(e)
         }
 
 
