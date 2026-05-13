@@ -5,12 +5,16 @@ import pandas as pd
 import faiss
 from sentence_transformers import SentenceTransformer
 
+# -------------------------------------------------
+# PATH SETUP
+# -------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 if BASE_DIR not in sys.path:
     sys.path.append(BASE_DIR)
 
 from models.user_profile import build_user_profile
+from utils.data_loader import load_businesses
 
 # -------------------------------------------------
 # MODEL
@@ -18,45 +22,60 @@ from models.user_profile import build_user_profile
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # -------------------------------------------------
-# DATA
+# DATA PATHS
 # -------------------------------------------------
 META_PATH = os.path.join(BASE_DIR, "data", "embeddings", "reviews_with_ids.csv")
 INDEX_PATH = os.path.join(BASE_DIR, "data", "embeddings", "faiss.index")
-BUSINESS_PATH = os.path.join(BASE_DIR, "data", "processed", "businesses.csv")
-
-df = pd.read_csv(META_PATH)
-index = faiss.read_index(INDEX_PATH)
-businesses = pd.read_csv(BUSINESS_PATH)
-
-businesses["business_id"] = businesses["business_id"].astype(str).str.strip()
-
-business_map = dict(zip(businesses["business_id"], businesses["name"]))
-business_cat_map = dict(
-    zip(
-        businesses["business_id"],
-        businesses["categories"].fillna("").str.lower()
-    )
-)
 
 # -------------------------------------------------
-# SAFE UTIL
+# LOAD DATA
+# -------------------------------------------------
+df = pd.read_csv(META_PATH)
+
+businesses = load_businesses()
+businesses.columns = businesses.columns.str.strip()
+
+# -------------------------------------------------
+# SAFE BUSINESS MAPS
+# -------------------------------------------------
+if "business_id" in businesses.columns:
+    businesses["business_id"] = businesses["business_id"].astype(str).str.strip()
+else:
+    raise ValueError("businesses.csv missing 'business_id' column")
+
+business_name_map = dict(zip(
+    businesses["business_id"],
+    businesses.get("name", "").fillna("Unknown")
+))
+
+business_cat_map = dict(zip(
+    businesses["business_id"],
+    businesses.get("categories", "").fillna("").astype(str).str.strip().str.lower()
+))
+
+# -------------------------------------------------
+# LOAD FAISS INDEX
+# -------------------------------------------------
+index = faiss.read_index(INDEX_PATH)
+
+
+# -------------------------------------------------
+# SAFE UTILITIES
 # -------------------------------------------------
 def safe_float(x):
     try:
+        if x is None:
+            return 0.0
+        if isinstance(x, float) and np.isnan(x):
+            return 0.0
         return float(x)
     except:
         return 0.0
 
 
 def l2norm(v):
+    v = np.array(v)
     return v / (np.linalg.norm(v) + 1e-8)
-
-
-# -------------------------------------------------
-# SCORE HELPERS
-# -------------------------------------------------
-def base_score(dist):
-    return 1 / (1 + dist)
 
 
 def cosine(a, b):
@@ -64,10 +83,23 @@ def cosine(a, b):
 
 
 # -------------------------------------------------
-# USER VECTOR (STRUCTURED SIGNAL ONLY)
+# EMBEDDING
+# -------------------------------------------------
+def embed_item(text: str):
+    return l2norm(model.encode([str(text)])[0])
+
+
+# -------------------------------------------------
+# BASE SCORE
+# -------------------------------------------------
+def base_score(dist):
+    return 1 / (1 + float(dist))
+
+
+# -------------------------------------------------
+# USER VECTOR (SAFE)
 # -------------------------------------------------
 def build_user_vector(profile):
-
     traits = profile.get("behavioral_traits", {})
     rating = profile.get("rating_behavior", {})
     sentiment = profile.get("sentiment_profile", {})
@@ -77,23 +109,16 @@ def build_user_vector(profile):
         safe_float(rating.get("strictness", 0.5)),
         safe_float(rating.get("variance", 0.5)),
         safe_float(sentiment.get("avg_sentiment", 0)),
-        float(traits.get("positive_reviewer", False)),
-        float(traits.get("critical_reviewer", False)),
-        float(traits.get("detail_oriented", False))
+        float(traits.get("positive_reviewer", 0)),
+        float(traits.get("critical_reviewer", 0)),
+        float(traits.get("detail_oriented", 0))
     ], dtype=np.float32)
 
     return l2norm(vec)
 
 
 # -------------------------------------------------
-# ITEM EMBEDDING
-# -------------------------------------------------
-def embed_item(text: str):
-    return l2norm(model.encode([str(text)])[0])
-
-
-# -------------------------------------------------
-# PERSONALITY SCORE
+# USER SCORING
 # -------------------------------------------------
 def compute_user_score(item, profile):
 
@@ -123,14 +148,14 @@ def compute_user_score(item, profile):
 
 
 # -------------------------------------------------
-# CATEGORY BOOST
+# CATEGORY BOOST (SAFE)
 # -------------------------------------------------
 def category_boost(category, profile):
 
     if not category:
         return 1.0
 
-    category = category.lower()
+    category = str(category).lower()
 
     traits = profile.get("behavioral_traits", {})
     rating = profile.get("rating_behavior", {})
@@ -153,7 +178,7 @@ def category_boost(category, profile):
 
 
 # -------------------------------------------------
-# DIVERSITY (SAFE MMR)
+# DIVERSITY (MMR)
 # -------------------------------------------------
 def diversify(results, k):
 
@@ -193,7 +218,7 @@ def diversify(results, k):
 
 
 # -------------------------------------------------
-# MAIN RETRIEVE (FIXED + CLEAN)
+# MAIN RETRIEVE FUNCTION
 # -------------------------------------------------
 def retrieve(query, user_id=None, k=5, use_llm=True):
 
@@ -202,11 +227,14 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
     profile = None
     user_vec = None
 
+    # -------------------------------------------------
+    # USER PROFILE
+    # -------------------------------------------------
     if user_id:
         try:
             profile = build_user_profile(user_id)
             user_vec = build_user_vector(profile)
-        except:
+        except Exception:
             profile = None
 
     # -------------------------------------------------
@@ -222,6 +250,7 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
             continue
 
         row = df.iloc[idx]
+
         bid = str(row.get("business_id", "")).strip()
 
         category = business_cat_map.get(bid, "")
@@ -229,6 +258,7 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
         review_score = base_score(float(dist))
 
         text = str(row.get("text", ""))
+
         item_vec = embed_item(text)
 
         semantic_alignment = cosine(query_emb, item_vec)
@@ -237,7 +267,7 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
 
         results.append({
             "business_id": bid,
-            "business_name": business_map.get(bid, "Unknown"),
+            "business_name": business_name_map.get(bid, "Unknown"),
             "category": category,
             "text": text,
             "stars": safe_float(row.get("stars", 0)),
@@ -262,14 +292,14 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
             r["score"] *= category_boost(r.get("category", ""), profile)
 
     # -------------------------------------------------
-    # FINAL RANKING
+    # SORT
     # -------------------------------------------------
     results.sort(key=lambda x: x["score"], reverse=True)
 
     final = diversify(results, k)
 
     # -------------------------------------------------
-    # CLEAN OUTPUT (NO VECTORS)
+    # CLEAN OUTPUT
     # -------------------------------------------------
     return {
         "query": str(query),

@@ -1,17 +1,17 @@
 import os
 import sys
 import json
-import re
+import random
 import pandas as pd
 import requests
 from dotenv import load_dotenv
 
+# -------------------------------------------------
+# ENV
+# -------------------------------------------------
 load_dotenv()
 
-BASE_DIR = os.path.dirname(
-    os.path.dirname(os.path.abspath(__file__))
-)
-
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.append(BASE_DIR)
 
@@ -26,43 +26,63 @@ businesses_path = os.path.join(BASE_DIR, "data", "processed", "businesses.csv")
 
 reviews = pd.read_csv(reviews_path)
 businesses = pd.read_csv(businesses_path)
-
 businesses.columns = [c.strip().lower() for c in businesses.columns]
 
 
 # -------------------------------------------------
-# OLLAMA CONFIG
+# OLLAMA CONFIG (.env driven)
 # -------------------------------------------------
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:latest")
+OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", 0.8))
 
 
 # -------------------------------------------------
-# SAFE BUSINESS HELPERS
+# HELPERS
 # -------------------------------------------------
 def get_business_name(biz):
     return str(biz.get("name", "Unknown Business"))
-
 
 def get_business_category(biz):
     return str(biz.get("categories") or biz.get("category") or "general")
 
 
 # -------------------------------------------------
-# JSON EXTRACTOR
+# CRITICAL FIX: SANITIZE USER PROFILE
+# (PREVENTS MODEL COPYING RAW STRUCTURE)
+# -------------------------------------------------
+def simplify_profile(profile):
+    rb = profile.get("rating_behavior", {})
+
+    return {
+        "avg_rating": float(rb.get("avg_rating", 3.5)),
+        "strictness": float(rb.get("strictness", 0.5)),
+        "variance": float(rb.get("variance", 0.7))
+    }
+
+
+# -------------------------------------------------
+# JSON PARSER (ROBUST)
 # -------------------------------------------------
 def extract_json(text):
     if not text:
         return None
 
-    text = text.replace("```json", "").replace("```", "").strip()
+    text = text.strip()
 
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
+    try:
+        return json.loads(text)
+    except:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+
+    if start == -1 or end == -1:
         return None
 
     try:
-        return json.loads(match.group())
+        return json.loads(text[start:end + 1])
     except:
         return None
 
@@ -71,19 +91,18 @@ def extract_json(text):
 # OLLAMA CALL
 # -------------------------------------------------
 def call_ollama(prompt):
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        "options": {
+            "temperature": OLLAMA_TEMPERATURE,
+            "top_p": 0.95
+        }
+    }
 
-    r = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0.7
-            }
-        },
-        timeout=40
-    )
+    r = requests.post(OLLAMA_URL, json=payload, timeout=60)
 
     if r.status_code != 200:
         raise Exception(r.text)
@@ -92,134 +111,173 @@ def call_ollama(prompt):
 
 
 # -------------------------------------------------
-# RATING ENGINE (STABLE + CONSISTENT)
+# INTELLIGENT RATING MODEL
 # -------------------------------------------------
-def compute_rating(profile):
-
+def infer_rating(profile, category):
     rb = profile.get("rating_behavior", {})
 
-    base = float(rb.get("avg_rating", 3.5))
+    avg = float(rb.get("avg_rating", 3.6))
     strictness = float(rb.get("strictness", 0.5))
+    variance = float(rb.get("variance", 0.7))
 
-    rating = round(base)
+    bias_map = {
+        "restaurant": 0.2,
+        "food": 0.2,
+        "hotel": 0.1,
+        "service": -0.1,
+        "tech": 0.0
+    }
 
-    # behavioral adjustment
+    bias = 0.0
+    for k, v in bias_map.items():
+        if k in category.lower():
+            bias = v
+
+    noise = random.uniform(-variance, variance)
+    score = avg + bias + noise
+
     if strictness > 0.7:
-        rating -= 1
+        score -= random.uniform(0.2, 0.6)
     elif strictness < 0.3:
-        rating += 1
+        score += random.uniform(0.1, 0.5)
 
-    return max(1, min(5, rating))
+    return max(1, min(5, round(score)))
 
 
 # -------------------------------------------------
-# FALLBACK REVIEW (HIGH QUALITY, CONSISTENT)
+# CRITICAL FIX: STRONG PROMPT SEPARATION
+# -------------------------------------------------
+def build_prompt(profile, business, rating):
+
+    safe_profile = simplify_profile(profile)
+
+    return f"""
+You are writing a REAL HUMAN REVIEW.
+
+IMPORTANT:
+- User profile is ONLY behavioral signal
+- DO NOT output any profile fields
+- DO NOT output JSON structures from input
+
+USER BEHAVIOR SIGNALS:
+{json.dumps(safe_profile)}
+
+BUSINESS:
+Name: {business["name"]}
+Category: {business["categories"]}
+
+TASK:
+Write a believable 2–4 sentence review based on a real visit.
+
+The tone MUST match rating: {rating}
+
+OUTPUT FORMAT (STRICT):
+{{
+  "review": "natural human review text only"
+}}
+
+RULES:
+- NO metadata
+- NO rating_behavior
+- NO sentiment_profile
+- NO explanations
+- ONLY the review text
+"""
+
+
+# -------------------------------------------------
+# FALLBACK (ONLY IF MODEL FAILS COMPLETELY)
 # -------------------------------------------------
 def fallback_review(name, rating):
-
-    tone = {
-        1: "very negative",
-        2: "negative",
-        3: "neutral",
-        4: "positive",
-        5: "very positive"
+    tones = {
+        1: "terrible",
+        2: "below average",
+        3: "okay",
+        4: "good",
+        5: "excellent"
     }
 
     return (
-        f"{name} was a {tone.get(rating, 'neutral')} experience overall. "
-        f"The experience matched expectations for its category. "
-        f"I would {'not ' if rating <= 2 else ''}recommend it based on my visit."
+        f"My experience at {name} was {tones.get(rating)}. "
+        f"There were some noticeable aspects during the visit. "
+        f"I would {'not ' if rating <= 2 else ''}visit again."
     )
 
 
 # -------------------------------------------------
-# MAIN REVIEW GENERATOR
+# OUTPUT VALIDATION (CRITICAL FIX)
+# -------------------------------------------------
+def is_valid_review(text):
+    if not text:
+        return False
+
+    banned = [
+        "rating_behavior",
+        "sentiment_profile",
+        "linguistic_style"
+    ]
+
+    for b in banned:
+        if b in text:
+            return False
+
+    return len(text.strip()) > 15
+
+
+# -------------------------------------------------
+# MAIN GENERATOR
 # -------------------------------------------------
 def generate_review(user_id, business_id):
 
-    # profile (safe fallback)
+    used_fallback = False
+
     try:
         profile = build_user_profile(user_id)
     except:
-        profile = {}
+        profile = {"rating_behavior": {}}
 
     biz_df = businesses[businesses["business_id"].astype(str) == str(business_id)]
 
     if biz_df.empty:
-        return {
-            "success": False,
-            "error": "Business not found"
-        }
+        return {"success": False, "error": "Business not found"}
 
     biz = biz_df.iloc[0]
 
     name = get_business_name(biz)
     category = get_business_category(biz)
 
-    rating = compute_rating(profile)
+    rating = infer_rating(profile, category)
 
-    # -------------------------------------------------
-    # IMPROVED PROMPT (TASK A OPTIMIZED)
-    # -------------------------------------------------
-    prompt = f"""
-You are a professional review writer.
+    prompt = build_prompt(profile, biz, rating)
 
-STRICT RULES:
-- Rating MUST be {rating}
-- Write EXACTLY 2–3 sentences
-- Must match rating sentiment
-- No headers, no explanations
-- Return ONLY JSON
+    review = None
 
-Business:
-Name: {name}
-Category: {category}
-
-Output format:
-{{
-  "rating": {rating},
-  "review": "natural human review"
-}}
-"""
-
-    try:
-
+    # retry loop (no premature fallback)
+    for _ in range(3):
         raw = call_ollama(prompt)
         parsed = extract_json(raw)
 
-        # retry once if broken
-        if not parsed or not parsed.get("review"):
-            raw = call_ollama(prompt + "\nReturn ONLY valid JSON.")
-            parsed = extract_json(raw)
+        if parsed and is_valid_review(parsed.get("review")):
+            review = parsed["review"]
+            break
 
-        review = parsed.get("review") if parsed else None
+    # ONLY fallback if model fully fails
+    if not review:
+        used_fallback = True
+        review = fallback_review(name, rating)
 
-        # final safety net
-        if not review or not review.strip():
-            review = fallback_review(name, rating)
-
-        return {
-            "success": True,
-            "user_id": user_id,
-            "business_id": business_id,
-            "business_name": name,
-            "rating": rating,
-            "review": review,
-            "model": OLLAMA_MODEL
-        }
-
-    except Exception as e:
-
-        return {
-            "success": True,
-            "user_id": user_id,
-            "business_id": business_id,
-            "business_name": name,
-            "rating": rating,
-            "review": fallback_review(name, rating),
-            "model": "fallback",
-            "error": str(e)
-        }
+    return {
+        "success": True,
+        "user_id": user_id,
+        "business_id": business_id,
+        "business_name": name,
+        # "category": category,
+        "rating": rating,
+        "review": review,
+        "model": OLLAMA_MODEL,
+        "temperature": OLLAMA_TEMPERATURE,
+        "used_fallback": used_fallback
+    }
 
 
 # -------------------------------------------------
@@ -230,4 +288,5 @@ if __name__ == "__main__":
     sample_user = reviews["user_id"].sample(1).values[0]
     sample_business = businesses["business_id"].sample(1).values[0]
 
-    print(generate_review(sample_user, sample_business))
+    result = generate_review(sample_user, sample_business)
+    print(json.dumps(result, indent=2))

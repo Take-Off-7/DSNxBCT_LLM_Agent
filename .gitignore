@@ -1,25 +1,50 @@
+# =====================
+# DATA (CRITICAL)
+# =====================
+project/data/raw/
+project/data/processed/
+project/data/embeddings/
+
+*.csv
+*.json
+*.jsonl
+*.zip
 
 # =====================
-# DATA (VERY IMPORTANT)
+# EMBEDDINGS / VECTOR DB
 # =====================
-project/data/raw/*.json
-project/data/raw/*.jsonl
-project/data/raw/*.zip
+*.npy
+*.npz
+*.faiss
+*.index
+*.ann
 
-project/data/processed/*
-project/data/embeddings/**
+# =====================
+# MODEL ARTIFACTS
+# =====================
+*.pkl
+*.joblib
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.bin
+*.parquet
 
 # =====================
 # PYTHON
 # =====================
 __pycache__/
 *.pyc
+*.pyo
 
 # =====================
 # ENVIRONMENT
 # =====================
 venv/
 .env
+.env.*
+.env.local
 
 # =====================
 # NOTEBOOKS
@@ -27,9 +52,8 @@ venv/
 .ipynb_checkpoints/
 
 # =====================
-# MODEL ARTIFACTS
+# SYSTEM / IDE
 # =====================
-*.pkl
-*.faiss
-*.parquet
-
+.DS_Store
+.vscode/
+.idea/
