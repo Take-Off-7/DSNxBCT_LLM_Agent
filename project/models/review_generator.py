@@ -171,6 +171,13 @@ Write a believable 2–4 sentence review based on a real visit.
 
 The tone MUST match rating: {rating}
 
+ADDITIONAL STYLE REQUIREMENT (VERY IMPORTANT):
+- You MUST include EXACTLY ONE sentence written in OBVIOUS Nigerian Pidgin English
+- The Pidgin sentence must be clearly recognizable as Nigerian (e.g. "na so e be", "I no go lie", "the place dey ok but...")
+- The Pidgin sentence should NOT be subtle or mixed English — it must be clearly Pidgin
+- The remaining sentences must be standard English
+- Do NOT repeat multiple Pidgin sentences — ONLY ONE
+
 OUTPUT FORMAT (STRICT):
 {{
   "review": "natural human review text only"
@@ -183,7 +190,6 @@ RULES:
 - NO explanations
 - ONLY the review text
 """
-
 
 # -------------------------------------------------
 # FALLBACK (ONLY IF MODEL FAILS COMPLETELY)
