@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+
+  ollama:
+    image: ollama/ollama
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./project
+      dockerfile: Dockerfile
+    container_name: llm-agent-api
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_URL=http://ollama:11434/api/generate
+      - OLLAMA_MODEL=llama3.2:1b
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+volumes:
+  ollama_data:

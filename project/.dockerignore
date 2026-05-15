@@ -5,5 +5,4 @@ __pycache__
 .env
 data/raw
 data/embeddings/*.npy
-data/embeddings/*.index
 .git
