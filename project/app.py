@@ -33,7 +33,7 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
 # APP
 # -------------------------------------------------
 app = FastAPI(
-    title="LLM Agent Hackathon API (Production Upgrade)",
+    title="TeamAI LLM Agent Hackathon API",
     description="User Modeling + Review Generation + Agentic Recommendation System",
     version="2.0.0"
 )
@@ -220,7 +220,7 @@ def recommend(req: RecommendRequest):
         return safe_response(data={
             "query": req.query,
             "user_id": req.user_id,
-            "recommendations": results,
+            # "recommendations": results,
             "ai_response": ai_response,
             "profile_loaded": bool(profile)
         })

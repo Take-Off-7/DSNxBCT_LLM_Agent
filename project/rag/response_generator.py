@@ -219,7 +219,7 @@ TASK:
     }
 
     try:
-        response = requests.post(OLLAMA_URL, json=payload, timeout=25)
+        response = requests.post(OLLAMA_URL, json=payload, timeout=120)
         data = response.json()
         text = data.get("response", "")
 
