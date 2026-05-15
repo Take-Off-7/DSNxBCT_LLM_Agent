@@ -50,7 +50,7 @@ business_name_map = dict(zip(
 
 business_cat_map = dict(zip(
     businesses["business_id"],
-    businesses.get("categories", "").fillna("").astype(str).str.strip().str.lower()
+    businesses.get("categories", "").fillna("").astype(str).str.strip()
 ))
 
 # -------------------------------------------------
@@ -96,28 +96,7 @@ def base_score(dist):
 
 
 # -------------------------------------------------
-# USER VECTOR (SAFE)
-# -------------------------------------------------
-def build_user_vector(profile):
-    traits = profile.get("behavioral_traits", {})
-    rating = profile.get("rating_behavior", {})
-    sentiment = profile.get("sentiment_profile", {})
-
-    vec = np.array([
-        safe_float(rating.get("avg_rating", 3)),
-        safe_float(rating.get("strictness", 0.5)),
-        safe_float(rating.get("variance", 0.5)),
-        safe_float(sentiment.get("avg_sentiment", 0)),
-        float(traits.get("positive_reviewer", 0)),
-        float(traits.get("critical_reviewer", 0)),
-        float(traits.get("detail_oriented", 0))
-    ], dtype=np.float32)
-
-    return l2norm(vec)
-
-
-# -------------------------------------------------
-# USER SCORING
+# USER SCORING (SAFE SCALAR ONLY)
 # -------------------------------------------------
 def compute_user_score(item, profile):
 
@@ -144,61 +123,6 @@ def compute_user_score(item, profile):
         score *= 1.10
 
     return float(score)
-
-
-# -------------------------------------------------
-# CATEGORY BOOST (SAFE)
-# -------------------------------------------------
-def category_boost(category, profile):
-
-    if not category:
-        return 1.0
-
-    category = str(category).lower()
-
-    traits = profile.get("behavioral_traits", {})
-    rating = profile.get("rating_behavior", {})
-
-    boost = 1.0
-
-    if rating.get("strictness", 0) > 0.65:
-        if "restaurant" in category or "hotel" in category:
-            boost += 0.06
-
-    if traits.get("detail_oriented"):
-        if "luxury" in category or "spa" in category:
-            boost += 0.10
-
-    if traits.get("positive_reviewer"):
-        if "bar" in category or "restaurant" in category:
-            boost += 0.06
-
-    return boost
-
-
-# -------------------------------------------------
-# FIXED: USER-COMPATIBILITY SCORE (NO EMBEDDING MIX)
-# -------------------------------------------------
-def user_compatibility_score(item, profile):
-    """
-    FIX: replaces invalid cosine(user_vec, item_vec)
-    with scalar behavioral compatibility only
-    """
-
-    if not profile:
-        return 0.0
-
-    rating = profile.get("rating_behavior", {})
-    sentiment = profile.get("sentiment_profile", {})
-
-    rating_bias = abs(
-        safe_float(item.get("stars", 3)) -
-        safe_float(rating.get("avg_rating", 3))
-    )
-
-    sentiment_bias = abs(safe_float(sentiment.get("avg_sentiment", 0)))
-
-    return float(1.0 - (rating_bias * 0.2) + (sentiment_bias * 0.1))
 
 
 # -------------------------------------------------
@@ -249,12 +173,10 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
     query_emb = embed_item(query)
 
     profile = None
-    user_vec = None
 
     if user_id:
         try:
             profile = build_user_profile(user_id)
-            user_vec = build_user_vector(profile)
         except Exception:
             profile = None
 
@@ -270,19 +192,24 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
         row = df.iloc[idx]
 
         bid = str(row.get("business_id", "")).strip()
+
+        name = business_name_map.get(bid, "Unknown")
         category = business_cat_map.get(bid, "")
+        text = str(row.get("text", ""))
+
+        # ✅ IMPORTANT: categories injected into embedding (LEARNED, NOT RULED)
+        full_text = f"{name} {category} {text}"
+
+        item_vec = embed_item(full_text)
 
         review_score = base_score(float(dist))
-        text = str(row.get("text", ""))
-        item_vec = embed_item(text)
-
         semantic_alignment = cosine(query_emb, item_vec)
 
         score = review_score + semantic_alignment * 0.30
 
         results.append({
             "business_id": bid,
-            "business_name": business_name_map.get(bid, "Unknown"),
+            "business_name": name,
             "category": category,
             "text": text,
             "stars": safe_float(row.get("stars", 0)),
@@ -291,7 +218,7 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
         })
 
     # -------------------------------------------------
-    # PERSONALIZATION (FIXED)
+    # PERSONALIZATION (NO VECTOR MIXING)
     # -------------------------------------------------
     if profile:
 
@@ -302,23 +229,22 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
                 r["score"] * 0.30
             )
 
-            # FIX: removed invalid cosine(user_vec, item_vec)
-            r["score"] += user_compatibility_score(r, profile) * 0.15
-
-            r["score"] *= category_boost(r.get("category", ""), profile)
-
+    # -------------------------------------------------
+    # SORT + DIVERSIFY
+    # -------------------------------------------------
     results.sort(key=lambda x: x["score"], reverse=True)
 
     final = diversify(results, k)
 
+    # -------------------------------------------------
+    # CLEAN OUTPUT
+    # -------------------------------------------------
     return {
         "query": str(query),
         "results": [
             {
                 "business_id": str(r["business_id"]),
                 "business_name": str(r["business_name"]),
-                # "category": str(r["category"]),
-                # "text": str(r["text"]),
                 "stars": float(r["stars"]),
                 "score": float(r["score"])
             }
