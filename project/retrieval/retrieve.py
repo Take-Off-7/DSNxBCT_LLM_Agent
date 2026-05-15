@@ -317,11 +317,11 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
             {
                 "business_id": str(r["business_id"]),
                 "business_name": str(r["business_name"]),
-                "category": str(r["category"]),
-                "text": str(r["text"]),
+                # "category": str(r["category"]),
+                # "text": str(r["text"]),
                 "stars": float(r["stars"]),
                 "score": float(r["score"])
             }
-            for r in final
+            for r in final[:3]
         ]
     }

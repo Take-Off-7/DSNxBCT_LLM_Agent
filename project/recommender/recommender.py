@@ -1,145 +1,146 @@
 import numpy as np
+import pandas as pd
 from sentence_transformers import SentenceTransformer
+from retrieval.retrieve import retrieve
 from models.user_profile import build_user_profile
 
+# -------------------------------------------------
+# MODEL
+# -------------------------------------------------
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
-# -------------------------------------------------
-# INTENT DETECTION (AGENT STEP 1)
-# -------------------------------------------------
-def detect_intent(query: str):
-
-    q = query.lower()
-
-    if any(w in q for w in ["weekend", "go", "visit", "hangout", "place"]):
-        return "experience"
-
-    if any(w in q for w in ["eat", "food", "restaurant", "brunch"]):
-        return "food"
-
-    if any(w in q for w in ["fun", "activity", "do", "something"]):
-        return "activity"
-
-    if any(w in q for w in ["relax", "chill", "date"]):
-        return "leisure"
-
-    return "general"
-
 
 # -------------------------------------------------
-# USER INTELLIGENCE VECTOR
+# BUILD CATEGORY SPACE (NO HARDCODING)
 # -------------------------------------------------
-def build_user_vector(profile):
+def build_category_space(businesses_df):
+    """
+    Creates semantic embeddings for all categories in dataset.
+    """
+    category_map = {}
 
-    if not profile:
-        return np.zeros(384)
+    for _, row in businesses_df.iterrows():
+        cats = str(row.get("categories", "")).lower().split(",")
 
-    rating = profile.get("rating_behavior", {})
-    sentiment = profile.get("sentiment_profile", {})
-    traits = profile.get("behavioral_traits", {})
+        for c in cats:
+            c = c.strip()
+            if c and c not in category_map:
+                category_map[c] = embedder.encode(c)
 
-    text = f"""
-    avg_rating:{rating.get('avg_rating',3)}
-    strictness:{rating.get('strictness',0.5)}
-    sentiment:{sentiment.get('avg_sentiment',0)}
-    positive:{traits.get('positive_reviewer',False)}
-    critical:{traits.get('critical_reviewer',False)}
-    detail:{traits.get('detail_oriented',False)}
+    return category_map
+
+
+# -------------------------------------------------
+# QUERY UNDERSTANDING (SEMANTIC ONLY)
+# -------------------------------------------------
+def infer_query_vector(query):
+    return embedder.encode(query)
+
+
+# -------------------------------------------------
+# CATEGORY MATCH SCORE
+# -------------------------------------------------
+def category_alignment_score(query_vec, category_vec):
+    if category_vec is None:
+        return 0.0
+
+    return float(np.dot(query_vec, category_vec) /
+                 (np.linalg.norm(query_vec) * np.linalg.norm(category_vec) + 1e-9))
+
+
+# -------------------------------------------------
+# MAIN RECOMMENDER AGENT
+# -------------------------------------------------
+def recommend(query, user_id=None, businesses_df=None, k=5):
+    """
+    Agentic recommender:
+    - no hardcoded intent rules
+    - semantic category inference
+    - retrieval + reranking + personalization
     """
 
-    vec = embedder.encode(text)
-    return vec / (np.linalg.norm(vec) + 1e-8)
+    # ---------------------------
+    # STEP 1: USER PROFILE
+    # ---------------------------
+    try:
+        profile = build_user_profile(user_id) if user_id else None
+    except:
+        profile = None
 
+    # ---------------------------
+    # STEP 2: SEMANTIC QUERY VECTOR
+    # ---------------------------
+    query_vec = infer_query_vector(query)
 
-# -------------------------------------------------
-# ITEM VECTOR
-# -------------------------------------------------
-def build_item_vector(item):
-    text = f"{item.get('business_name','')} {item.get('category','')} {item.get('text','')}"
-    vec = embedder.encode(text)
-    return vec / (np.linalg.norm(vec) + 1e-8)
+    # ---------------------------
+    # STEP 3: CATEGORY SPACE (DYNAMIC)
+    # ---------------------------
+    category_space = build_category_space(businesses_df) if businesses_df is not None else {}
 
+    # infer closest categories (soft matching)
+    category_scores = {}
+    for cat, vec in category_space.items():
+        category_scores[cat] = category_alignment_score(query_vec, vec)
 
-# -------------------------------------------------
-# EXPLANATION ENGINE (CRITICAL FOR TASK B)
-# -------------------------------------------------
-def explain(user_profile, item, intent):
+    top_categories = sorted(category_scores.items(), key=lambda x: x[1], reverse=True)[:3]
+    top_categories = [c[0] for c in top_categories]
 
-    reasons = []
+    # ---------------------------
+    # STEP 4: BASE RETRIEVAL
+    # ---------------------------
+    raw = retrieve(query=query, user_id=user_id, k=30)
+    candidates = raw.get("results", [])
 
-    rating = user_profile.get("rating_behavior", {})
-    traits = user_profile.get("behavioral_traits", {})
+    if not candidates:
+        return {
+            "query": query,
+            "recommendations": []
+        }
 
-    if rating.get("avg_rating", 3) >= 4:
-        reasons.append("you tend to prefer high-quality experiences")
-
-    if traits.get("positive_reviewer"):
-        reasons.append("you generally leave positive feedback")
-
-    if intent == "experience":
-        reasons.append("you asked for a place to go this weekend")
-
-    if intent == "food":
-        reasons.append("you show interest in food-related experiences")
-
-    if "restaurant" in item.get("category", ""):
-        reasons.append("this is a highly rated food venue")
-
-    if "nightlife" in item.get("category", ""):
-        reasons.append("matches social/outing behavior patterns")
-
-    return reasons[:3]
-
-
-# -------------------------------------------------
-# MAIN AGENTIC RECOMMENDER
-# -------------------------------------------------
-def get_recommendations(user_id, query, candidates, top_k=5):
-
-    profile = build_user_profile(user_id)
-    intent = detect_intent(query)
-
-    user_vec = build_user_vector(profile)
-    query_vec = embedder.encode(query)
-    query_vec = query_vec / (np.linalg.norm(query_vec) + 1e-8)
-
-    scored = []
+    # ---------------------------
+    # STEP 5: RERANKING (AGENTIC SCORING)
+    # ---------------------------
+    final = []
 
     for item in candidates:
 
-        item_vec = build_item_vector(item)
+        item_text = f"{item['business_name']} {item['category']} {item['text']}"
+        item_vec = embedder.encode(item_text)
 
-        # similarity signals
-        user_sim = np.dot(user_vec, item_vec)
-        query_sim = np.dot(query_vec, item_vec)
+        # semantic similarity
+        sim = float(np.dot(query_vec, item_vec) /
+                    (np.linalg.norm(query_vec) * np.linalg.norm(item_vec) + 1e-9))
 
-        stars = item.get("stars", 3) / 5
+        # category bonus (soft, not hardcoded)
+        cat_bonus = 0.0
+        for tc in top_categories:
+            if tc in item["category"].lower():
+                cat_bonus += 0.10
 
-        # INTENT WEIGHTING (IMPORTANT FIX)
-        if intent == "experience":
-            score = 0.4 * user_sim + 0.4 * query_sim + 0.2 * stars
+        # base score
+        score = item["score"]
 
-        elif intent == "food":
-            score = 0.3 * user_sim + 0.5 * query_sim + 0.2 * stars
+        # final blended score
+        score = (
+            0.45 * sim +
+            0.35 * score +
+            0.20 * cat_bonus
+        )
 
-        elif intent == "activity":
-            score = 0.5 * user_sim + 0.3 * query_sim + 0.2 * stars
+        item["final_score"] = score
+        final.append(item)
 
-        else:
-            score = 0.4 * user_sim + 0.3 * query_sim + 0.3 * stars
+    # ---------------------------
+    # STEP 6: SORT
+    # ---------------------------
+    final.sort(key=lambda x: x["final_score"], reverse=True)
 
-        scored.append({
-            "business_id": item.get("business_id"),
-            "business_name": item.get("business_name"),
-            "category": item.get("category"),
-            "text": item.get("text"),
-            "stars": item.get("stars"),
-            "score": float(score),
-            "reason": explain(profile, item, intent)
-        })
-
-    # sort
-    scored.sort(key=lambda x: x["score"], reverse=True)
-
-    # top 5 ONLY (STRICT)
-    return scored[:top_k]
+    # ---------------------------
+    # STEP 7: RETURN TOP-K
+    # ---------------------------
+    return {
+        "query": query,
+        "user_id": user_id,
+        "inferred_categories": top_categories,
+        "recommendations": final[:k]
+    }
