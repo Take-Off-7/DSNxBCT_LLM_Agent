@@ -1,6 +1,6 @@
 # DSNxBCT_LLM_Agent
 
-LLM-powered User Modeling & Review Generation System for the DSN × BCT Data & AI Hackathon 3.0.
+LLM-powered User Modeling & Review Generation and Recommendation System for the DSN × BCT Data & AI Hackathon 3.0.
 
 ---
 
@@ -11,6 +11,7 @@ This project builds a **user-aware LLM agent system** that learns from Yelp-styl
 - ⭐ Personalized rating predictions  
 - ✍🏾 Realistic review text generation  
 - 👤 User behavior modeling  
+- 🎯 Personalized recommendations
 - 🌐 FastAPI-based inference service  
 
 It uses **local LLM inference via Ollama** to ensure offline, low-cost deployment.
@@ -44,6 +45,19 @@ The system:
 
 ---
 
+## 🎯 Recommendation System (Task B)
+
+Given:
+- `query`
+- `user_id`
+
+The system:
+- Recommends relevant businesses
+- Personalizes results based on user preferences
+- Ranks recommendations by relevance
+
+---
+
 ## 🌐 API Service (FastAPI)
 
 Fully container-ready REST API for evaluation and demo purposes.
@@ -68,7 +82,6 @@ LLM Review Generator (Ollama)
 FastAPI Service Layer
 (app.py)
 
-
 ---
 
 # 📊 Dataset
@@ -89,28 +102,24 @@ data/processed/
 
 ---
 
-# ⚙️ Tech Stack
+## ⚙️ Tech Stack
 
 - Python 3.10+
 - FastAPI
 - Pandas
 - Requests
 - Ollama (local LLM runtime)
-- llama3.2 / mistral models
+- llama3.2 model
 
 ---
 
-# 🧠 LLM Setup
+## 🧠 LLM Setup
 
 This project uses **Ollama for local inference**:
 
 ### Install model
 ```bash
 ollama pull llama3.2:1b
-
-or faster alternative:
-
-ollama pull mistral
 
 Start Ollama server
 
