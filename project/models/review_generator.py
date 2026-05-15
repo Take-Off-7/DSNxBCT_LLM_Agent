@@ -33,7 +33,7 @@ businesses.columns = [c.strip().lower() for c in businesses.columns]
 # OLLAMA CONFIG (.env driven)
 # -------------------------------------------------
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:latest")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", 0.8))
 
 

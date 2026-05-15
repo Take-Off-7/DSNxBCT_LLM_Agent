@@ -58,7 +58,6 @@ business_cat_map = dict(zip(
 # -------------------------------------------------
 index = faiss.read_index(INDEX_PATH)
 
-
 # -------------------------------------------------
 # SAFE UTILITIES
 # -------------------------------------------------
@@ -178,6 +177,31 @@ def category_boost(category, profile):
 
 
 # -------------------------------------------------
+# FIXED: USER-COMPATIBILITY SCORE (NO EMBEDDING MIX)
+# -------------------------------------------------
+def user_compatibility_score(item, profile):
+    """
+    FIX: replaces invalid cosine(user_vec, item_vec)
+    with scalar behavioral compatibility only
+    """
+
+    if not profile:
+        return 0.0
+
+    rating = profile.get("rating_behavior", {})
+    sentiment = profile.get("sentiment_profile", {})
+
+    rating_bias = abs(
+        safe_float(item.get("stars", 3)) -
+        safe_float(rating.get("avg_rating", 3))
+    )
+
+    sentiment_bias = abs(safe_float(sentiment.get("avg_sentiment", 0)))
+
+    return float(1.0 - (rating_bias * 0.2) + (sentiment_bias * 0.1))
+
+
+# -------------------------------------------------
 # DIVERSITY (MMR)
 # -------------------------------------------------
 def diversify(results, k):
@@ -227,9 +251,6 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
     profile = None
     user_vec = None
 
-    # -------------------------------------------------
-    # USER PROFILE
-    # -------------------------------------------------
     if user_id:
         try:
             profile = build_user_profile(user_id)
@@ -237,9 +258,6 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
         except Exception:
             profile = None
 
-    # -------------------------------------------------
-    # FAISS SEARCH
-    # -------------------------------------------------
     distances, indices = index.search(query_emb.reshape(1, -1), k * 30)
 
     results = []
@@ -252,13 +270,10 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
         row = df.iloc[idx]
 
         bid = str(row.get("business_id", "")).strip()
-
         category = business_cat_map.get(bid, "")
 
         review_score = base_score(float(dist))
-
         text = str(row.get("text", ""))
-
         item_vec = embed_item(text)
 
         semantic_alignment = cosine(query_emb, item_vec)
@@ -276,9 +291,9 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
         })
 
     # -------------------------------------------------
-    # PERSONALIZATION
+    # PERSONALIZATION (FIXED)
     # -------------------------------------------------
-    if profile and user_vec is not None:
+    if profile:
 
         for r in results:
 
@@ -287,20 +302,15 @@ def retrieve(query, user_id=None, k=5, use_llm=True):
                 r["score"] * 0.30
             )
 
-            r["score"] += cosine(user_vec, r["vec"]) * 0.15
+            # FIX: removed invalid cosine(user_vec, item_vec)
+            r["score"] += user_compatibility_score(r, profile) * 0.15
 
             r["score"] *= category_boost(r.get("category", ""), profile)
 
-    # -------------------------------------------------
-    # SORT
-    # -------------------------------------------------
     results.sort(key=lambda x: x["score"], reverse=True)
 
     final = diversify(results, k)
 
-    # -------------------------------------------------
-    # CLEAN OUTPUT
-    # -------------------------------------------------
     return {
         "query": str(query),
         "results": [
