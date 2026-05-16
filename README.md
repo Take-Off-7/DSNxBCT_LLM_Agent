@@ -19,7 +19,7 @@ It uses **local LLM inference via Ollama** to ensure offline, low-cost deploymen
 ---
 
 ## 📁 Project Structure
-
+```text
 project/
 ├── app.py
 ├── api/                  # FastAPI routes
@@ -35,7 +35,7 @@ project/
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt
-
+```
 ---
 
 # 🚀 Key Features
@@ -85,7 +85,7 @@ Fully container-ready REST API for evaluation and demo purposes.
 ---
 
 # 🧱 System Architecture
-
+```text
 Yelp Dataset (raw JSON)
 ↓
 Data Processing Layer
@@ -101,7 +101,7 @@ LLM Review Generator (Ollama)
 ↓
 FastAPI Service Layer
 (app.py)
-
+```
 ---
 
 # 📊 Dataset
@@ -113,12 +113,12 @@ Yelp Academic Dataset:
 - user.json
 
 Processed into:
-
+```text
 data/processed/
 ├── reviews.csv
 ├── businesses.csv
 └── users.csv
-
+```
 ---
 
 ## ⚙️ Tech Stack
