@@ -188,52 +188,55 @@ data/processed/
 
 ### Step 1: Clone Repository
 ```bash
-git clone https://github.com/takeoff7/llm-agent.git
-cd llm-agent/project
+git clone https://github.com/Take-Off-7/DSNxBCT_LLM_Agent
+cd DSNxBCT_LLM_Agent/project
 ```
 
 ### Step 2: Install Ollama
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
 ```
-### Step 3: Pull Required Model
-```bash
-ollama pull llama3.2:1b
-```
 
-### Step 4: Start Ollama Server
-Open a NEW terminal:
+### Step 3: Start Ollama Server
 ```bash
 ollama serve
 ```
 Ollama runs by default at:
 http://localhost:11434
 
+### Step 4: Pull Required Model
+Open a NEW terminal:
+```bash
+ollama pull llama3.2:1b
+```
+
 ### Step 5: Pull and Run API Docker Container
 Open another terminal:
 ```bash
 docker pull takeoff7/llm-agent:latest
-docker run --network=host \
-  -e OLLAMA_URL=http://localhost:11434/api/generate \
-  takeoff7/llm-agent:latest
+docker run --network=host -e OLLAMA_URL=http://localhost:11434/api/generate takeoff7/llm-agent:latest
 ```
 
 ---
 
 ## 🔌 API Access & Endpoints
 
-After setup, access the OpenAPI (Swagger UI):
+After setup, open your browser and navigate to:
+
+http://localhost:8000
+
+Then append `/docs` to access the OpenAPI Swagger UI:
 
 http://localhost:8000/docs
 
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
-| `/` | GET | Health check |
-| `/samples` | GET | Example requests |
-| `/profile` | POST | Build or fetch user profile |
+| `/` | GET | Confirm API is running properly |
+| `/samples` | GET | Supply sample IDs for quick testing  |
+| `/profile` | POST | Build and fetch user profile |
 | `/review` | POST | Generate simulated review for a user and business |
 | `/recommend` | POST | Return personalized ranked recommendations |
-| `/llm-status` | GET | Check Ollama connection status |
+| `/llm-status` | GET | Health check and  Ollama connection status |
 
 ---
 
