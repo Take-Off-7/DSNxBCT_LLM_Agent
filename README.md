@@ -23,6 +23,7 @@ It uses **local LLM inference via Ollama** to ensure offline, low-cost deploymen
 project/
 ├── app.py
 ├── api/                  # FastAPI routes
+├── assets/               # Demo screenshots and presentation visuals
 ├── data/                 # Raw + processed data + embeddings
 ├── models/               # Rating, ranking, review & behavior models
 ├── rag/                  # Response generation (RAG pipeline)
