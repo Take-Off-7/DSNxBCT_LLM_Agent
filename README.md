@@ -87,32 +87,20 @@ Fully container-ready REST API for evaluation and demo purposes.
 # 🔄 System Pipeline
 ```text
 Yelp Dataset (Raw JSON)
-
         ↓
-
 Data Processing Layer (process_data.py)
-
         ↓
-
 Processed Data (CSV + embeddings)
-
         ↓
-
 User Profiling Engine (user_profile.py)
-
         ↓
-
 LLM Review Generator (review_generator.py, Ollama)
-
         ↓
-
 Recommendation Engine (recommender.py)
-
         ↓
-
 FastAPI Service Layer (app.py)
-
 ```
+
 ---
 
 # 📊 Dataset
