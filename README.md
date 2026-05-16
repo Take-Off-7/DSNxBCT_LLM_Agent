@@ -26,11 +26,11 @@ project/
 ├── data/                 # Raw + processed data + embeddings
 ├── models/               # Rating, ranking, review & behavior models
 ├── rag/                  # Response generation (RAG pipeline)
-├── recommender/         # Recommendation engine
-├── retrieval/           # FAISS + embedding search
-├── training/            # Model training scripts
-├── evaluation/          # Evaluation metrics & scoring
-├── prompts/             # LLM prompts
+├── recommender/          # Recommendation engine
+├── retrieval/            # FAISS + embedding search
+├── training/             # Model training scripts
+├── evaluation/           # Evaluation metrics & scoring
+├── prompts/              # LLM prompts
 ├── utils/                # Helper utilities
 ├── Dockerfile
 ├── docker-compose.yml
@@ -84,29 +84,40 @@ Fully container-ready REST API for evaluation and demo purposes.
 
 ---
 
-# 🧱 System Architecture
+# 🔄 System Pipeline
 ```text
-Yelp Dataset (raw JSON)
-↓
-Data Processing Layer
-(process_data.py)
-↓
-Processed CSV Data
-↓
-User Profiling Engine
-(user_profile.py)
-↓
-LLM Review Generator (Ollama)
-(review_generator.py)
-↓
-FastAPI Service Layer
-(app.py)
+Yelp Dataset (Raw JSON)
+
+        ↓
+
+Data Processing Layer (process_data.py)
+
+        ↓
+
+Processed Data (CSV + embeddings)
+
+        ↓
+
+User Profiling Engine (user_profile.py)
+
+        ↓
+
+LLM Review Generator (review_generator.py, Ollama)
+
+        ↓
+
+Recommendation Engine (recommender.py)
+
+        ↓
+
+FastAPI Service Layer (app.py)
+
 ```
 ---
 
 # 📊 Dataset
 
-Yelp Academic Dataset:
+**Yelp Open Dataset** (real-world business reviews and user interactions):
 
 - review.json
 - business.json
@@ -123,12 +134,14 @@ data/processed/
 
 ## ⚙️ Tech Stack
 
-- Python 3.10+
-- FastAPI
-- Pandas
-- Requests
-- Ollama (local LLM runtime)
-- llama3.2 model
+- 🐍 Python
+- ⚡ FastAPI
+- 🤖 Ollama (LLM)
+- 🔍 FAISS
+- 🧠 Pandas, NumPy
+- 📊 Scikit-learn
+- 🐳 Docker
+- 🗄️ JSON / CSV
 
 ---
 
