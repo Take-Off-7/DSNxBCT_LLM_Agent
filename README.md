@@ -38,6 +38,47 @@ project/
 ```
 ---
 
+## 🏗️ Architecture Diagram
+```text
+                +-------------------+
+                | Yelp Dataset      |
+                +-------------------+
+                          |
+                          v
+                +-------------------+
+                | Data Processing   |
+                +-------------------+
+                          |
+          +---------------+---------------+
+          |                               |
+          v                               v
++-------------------+       +----------------------+
+| User Profiling    |       | Embedding + FAISS    |
++-------------------+       +----------------------+
+          |                               |
+          +---------------+---------------+
+                          |
+                          v
+                +-------------------+
+                | LLM Agent Layer   |
+                | (Ollama)          |
+                +-------------------+
+                          |
+          +---------------+---------------+
+          |                               |
+          v                               v
++-------------------+       +----------------------+
+| Review Generator  |       | Recommendation API   |
++-------------------+       +----------------------+
+                          |
+                          v
+                +-------------------+
+                | FastAPI Service   |
+                +-------------------+
+```
+
+---
+
 # 🚀 Key Features
 
 ## 👤 User Modeling
@@ -133,6 +174,15 @@ data/processed/
 
 ---
 
+## 📋 Prerequisites
+- Python 3.10+
+- Docker
+- Ollama
+- Ubuntu 22.04+
+- 8GB RAM recommended
+
+---
+
 ## ⚙️ Full Setup Guide (Manual Deployment)
 
 ### Step 1: Clone Repository
@@ -215,37 +265,37 @@ http://localhost:8000/docs
 
 ---
 
-## ⚡ Performance Optimizations
+## 🚀 Future Work
 
-### Recent improvements include:
+- Multi-modal recommendations
+- Fine-tuned review generation
+- Real-time user adaptation
+- Hybrid retrieval + graph recommendation
+- Streaming LLM responses
 
-✅ Switched from openAI → ollama
-✅ Reduced prompt size for faster inference
-✅ Added request timeout controls
-✅ JSON parsing + fallback handling
-✅ Optional caching support (recommended for scale)
-✅ Lightweight persona-based prompting
+---
 
+## 👥 Contributors
 
+- Fakeye Taiwo
+- Fakeye Kehinde
+- Bamigbade Babatunde
+- Godwin Chidera
 
+---
 
-}
-🏆 Hackathon Highlights
-Real-world Yelp dataset
-LLM-powered personalization
-Behavioral user modeling
-FastAPI production-ready design
-Local inference (Ollama) for offline deployment
-Clean modular architecture
+## 📄 License
 
-🚀 Future Improvements
-Vector database (FAISS) for retrieval-augmented reasoning
-Async LLM inference (non-blocking API)
-Caching layer for repeated queries
-Multi-agent recommendation system (Task B)
-Dockerized deployment for judges
+MIT License
 
-👨🏾‍💻 Author
+---
 
-Built for DSN × BCT Data & AI Hackathon 3.0
-Focus: LLM Agents, User Modeling, Recommendation Systems
+## 🙏 Acknowledgements
+We would like to thank the following organizations, tools, platforms, and open-source communities that made this project possible:
+- **Bluechip Technologies** and **Data Science Nigeria (DSN)**  — for organizing the **DSN x BCT LLM Agent Challenge** and providing the opportunity to build and showcase innovative AI solutions.
+- **Yelp Open Dataset** — for providing large-scale real-world business, review, and user interaction data used for training and evaluation.
+- **Ollama** — for enabling efficient local LLM inference and offline deployment capabilities.
+- **FAISS** — for fast and scalable vector similarity search used in semantic retrieval.
+- **FastAPI** — for powering the lightweight and high-performance API service layer.
+- **Scikit-learn, Pandas, and NumPy** — for machine learning utilities, data processing, and numerical computation.
+- The broader **open-source AI community** for tools, research, and resources that inspired and supported this project.
