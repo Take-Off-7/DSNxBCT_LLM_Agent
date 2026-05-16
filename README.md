@@ -113,17 +113,55 @@ data/processed/
 
 ---
 
-## 🧠 LLM Setup
+## ⚙️ Full Setup Guide (Manual Deployment)
 
-This project uses **Ollama for local inference**:
+### Step 1: Clone Repository
+```bash
+git clone https://github.com/takeoff7/llm-agent.git
+cd llm-agent/project
+```
 
-### Install model
+### Step 2: Install Ollama
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+### Step 3: Pull Required Model
 ```bash
 ollama pull llama3.2:1b
+```
 
-Start Ollama server
-
+### Step 4: Start Ollama Server
+Open a NEW terminal:
+```bash
 ollama serve
+```
+Ollama runs by default at:
+http://localhost:11434
+
+### Step 5: Run API Docker Container
+Open another terminal:
+```bash
+docker run --network=host \
+  -e OLLAMA_URL=http://localhost:11434/api/generate \
+  takeoff7/llm-agent:latest
+```
+
+## 🔌 API Access & Endpoints
+
+After setup, access the OpenAPI (Swagger UI):
+
+http://localhost:8000/docs
+
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/` | GET | Health check |
+| `/samples` | GET | Example requests |
+| `/profile` | POST | Build or fetch user profile |
+| `/review` | POST | Generate simulated review for a user and business |
+| `/recommend` | POST | Return personalized ranked recommendations |
+| `/llm-status` | GET | Check Ollama connection status |
+
+## 🧪 Testing & Usage Guide
 
 ⚡ Performance Optimizations
 
