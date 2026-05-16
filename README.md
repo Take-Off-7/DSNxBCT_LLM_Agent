@@ -201,7 +201,7 @@ http://localhost:8000/docs
 }
 ```
 
-### 🔹 Testing Recommendations (POST /recommend)
+### 🔹 Testing Recommendations (`POST /recommend`)
 - Call `/samples` to get valid `user_id`  
 - Provide a query along with the `user_id`
 - Send request:
