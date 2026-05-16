@@ -158,9 +158,10 @@ ollama serve
 Ollama runs by default at:
 http://localhost:11434
 
-### Step 5: Run API Docker Container
+### Step 5: Pull and Run API Docker Container
 Open another terminal:
 ```bash
+docker pull takeoff7/llm-agent:latest
 docker run --network=host \
   -e OLLAMA_URL=http://localhost:11434/api/generate \
   takeoff7/llm-agent:latest
