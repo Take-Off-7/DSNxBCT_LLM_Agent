@@ -18,6 +18,26 @@ It uses **local LLM inference via Ollama** to ensure offline, low-cost deploymen
 
 ---
 
+## 📁 Project Structure
+
+project/
+├── app.py
+├── api/                  # FastAPI routes
+├── data/                 # Raw + processed data + embeddings
+├── models/               # Rating, ranking, review & behavior models
+├── rag/                  # Response generation (RAG pipeline)
+├── recommender/         # Recommendation engine
+├── retrieval/           # FAISS + embedding search
+├── training/            # Model training scripts
+├── evaluation/          # Evaluation metrics & scoring
+├── prompts/             # LLM prompts
+├── utils/                # Helper utilities
+├── Dockerfile
+├── docker-compose.yml
+└── requirements.txt
+
+---
+
 # 🚀 Key Features
 
 ## 👤 User Modeling
@@ -99,7 +119,6 @@ data/processed/
 ├── businesses.csv
 └── users.csv
 
-
 ---
 
 ## ⚙️ Tech Stack
@@ -146,6 +165,8 @@ docker run --network=host \
   takeoff7/llm-agent:latest
 ```
 
+---
+
 ## 🔌 API Access & Endpoints
 
 After setup, access the OpenAPI (Swagger UI):
@@ -161,90 +182,51 @@ http://localhost:8000/docs
 | `/recommend` | POST | Return personalized ranked recommendations |
 | `/llm-status` | GET | Check Ollama connection status |
 
+---
+
 ## 🧪 Testing & Usage Guide
 
-⚡ Performance Optimizations
+### 🔹 Testing Review Generation (`POST /review`)
 
-Recent improvements include:
+- Call `/samples` to get valid test IDs  
+- Copy a `user_id` and `business_id`  
+- Send request:
 
-✅ Switched from phi3 → llama3.2:1b / mistral
+```json
+{
+  "user_id": "FJf1k333aqmmMaMTv-CFNA",
+  "business_id": "G6lbDeRY_ZpD7FS5dL3qJw"
+}
+```
+
+### 🔹 Testing Recommendations (POST /recommend)
+- Call `/samples` to get valid `user_id`  
+- Provide a query along with the `user_id`
+- Send request:
+
+```json
+{
+  "query": "recommend a coffee shop",
+  "user_id": "lcp3WgYyYRfcqewpilwmyg"
+}
+```
+
+---
+
+## ⚡ Performance Optimizations
+
+### Recent improvements include:
+
+✅ Switched from openAI → ollama
 ✅ Reduced prompt size for faster inference
 ✅ Added request timeout controls
 ✅ JSON parsing + fallback handling
 ✅ Optional caching support (recommended for scale)
 ✅ Lightweight persona-based prompting
-🧪 API Endpoints
-🔹 Health Check
-GET /
-🔹 Task A — Review Generation (ID-based)
-POST /review
-Input:
-{
-  "user_id": "string",
-  "business_id": "string"
-}
-🔹 Task A — Review Generation (Name-based)
-POST /review-by-name
-Input:
-{
-  "user_name": "user_0",
-  "business_name": "Starbucks Coffee"
-}
-🔹 User Profile
-POST /profile
-🔹 Sample Data (IMPORTANT FOR JUDGES)
-GET /samples
 
-Returns:
 
-valid user IDs
-sample businesses
-🔹 Demo Input Generator
-GET /demo-input
 
-Returns ready-to-use test cases.
 
-📁 Project Structure
-project/
-├── app.py
-├── data/
-│   ├── raw/
-│   ├── processed/
-│   └── process_data.py
-│
-├── models/
-│   ├── user_profile.py
-│   └── review_generator.py
-│
-├── retrieval/
-├── notebooks/
-├── prompts/
-├── requirements.txt
-└── README.md
-🧪 How to Run
-1. Install dependencies
-pip install -r requirements.txt
-2. Process dataset
-python data/process_data.py
-3. Start Ollama
-ollama serve
-4. Run API server
-uvicorn app:app --reload
-5. Open docs
-http://127.0.0.1:8000/docs
-🧪 How to Test
-Step 1 — Get valid inputs
-GET /samples
-
-or
-
-GET /demo-input
-Step 2 — Run review generation
-Example
-POST /review
-{
-  "user_id": "mh_-eMZ6K5RLWhZyISBhwA",
-  "business_id": "abc123"
 }
 🏆 Hackathon Highlights
 Real-world Yelp dataset
@@ -253,12 +235,14 @@ Behavioral user modeling
 FastAPI production-ready design
 Local inference (Ollama) for offline deployment
 Clean modular architecture
+
 🚀 Future Improvements
 Vector database (FAISS) for retrieval-augmented reasoning
 Async LLM inference (non-blocking API)
 Caching layer for repeated queries
 Multi-agent recommendation system (Task B)
 Dockerized deployment for judges
+
 👨🏾‍💻 Author
 
 Built for DSN × BCT Data & AI Hackathon 3.0
