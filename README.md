@@ -284,7 +284,7 @@ http://localhost:8000/docs
 ## 📸 Demo
 
 ### Swagger API
-<img src="project/assets/swagger1.png" width="800"/>
+![swagger](project/assets/swagger1.png)
 ![swagger](project/assets/swagger2.png)
 
 ### Home
