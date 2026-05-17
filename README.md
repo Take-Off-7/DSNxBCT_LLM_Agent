@@ -242,16 +242,28 @@ http://localhost:8000/docs
 
 ## 🧪 Testing & Usage Guide
 
-### 🔹 Testing Review Generation (`POST /review`)
+### 🔹 Testing User Profile (`POST /profile`)
 
-- Call `/samples` to get valid test IDs  
-- Copy a `user_id` and `business_id`  
+- Call `/samples` to get a valid `user_id`
+- Provide the selected `user_id` in the request body
 - Send request:
 
 ```json
 {
-  "user_id": "FJf1k333aqmmMaMTv-CFNA",
-  "business_id": "G6lbDeRY_ZpD7FS5dL3qJw"
+  "user_id": "lcp3WgYyYRfcqewpilwmyg"
+}
+```
+
+### 🔹 Testing Review Generation (`POST /review`)
+
+- Call `/samples` to get valid `user_id` and `business_id`
+- Provide both IDs in the request body
+- Send request:
+
+```json
+{
+  "user_id": "FJf1k333aqmmMaMTv-CFNA",
+  "business_id": "G6lbDeRY_ZpD7FS5dL3qJw"
 }
 ```
 
