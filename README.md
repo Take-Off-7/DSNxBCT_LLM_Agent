@@ -281,6 +281,37 @@ http://localhost:8000/docs
 
 ---
 
+## 📸 Demo
+
+### Swagger API
+![swagger](assets/swagger1.png)
+![swagger](assets/swagger2.png)
+
+### Home
+![swagger](assets/home1.png)
+![swagger](assets/home2.png)
+
+### User Profile
+![profile](assets/profile1.png)
+![profile](assets/profile2.png)
+![profile](assets/profile2.png)
+
+### Review Generation
+![review](assets/review1.png)
+![review](assets/review2.png)
+![review](assets/review3.png)
+
+### Recommendation
+![recommend](assets/recommend1.png)
+![recommend](assets/recommend2.png)
+![recommend](assets/recommend3.png)
+
+### LLM-Status
+![llm-status](assets/status1.png)
+![llm-status](assets/status2.png)
+
+---
+
 ## 🚀 Future Work
 
 - Multi-modal recommendations
