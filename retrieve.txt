@@ -1,0 +1,2727 @@
+===== FILE: ./.gitignore =====
+# =====================
+# DATA (CRITICAL)
+# =====================
+project/data/raw/
+project/data/processed/
+project/data/embeddings/
+
+*.csv
+*.json
+*.jsonl
+*.zip
+
+# =====================
+# EMBEDDINGS / VECTOR DB
+# =====================
+*.npy
+*.npz
+*.faiss
+*.index
+*.ann
+
+# =====================
+# MODEL ARTIFACTS
+# =====================
+*.pkl
+*.joblib
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.bin
+*.parquet
+
+# =====================
+# PYTHON
+# =====================
+__pycache__/
+*.pyc
+*.pyo
+
+# =====================
+# ENVIRONMENT
+# =====================
+venv/
+.env
+.env.*
+.env.local
+
+# =====================
+# NOTEBOOKS
+# =====================
+.ipynb_checkpoints/
+
+# =====================
+# SYSTEM / IDE
+# =====================
+.DS_Store
+.vscode/
+.idea/
+
+===== FILE: ./project/evaluation/evaluation.py =====
+import os
+import sys
+import numpy as np
+import pandas as pd
+from sklearn.metrics import mean_squared_error
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(BASE_DIR)
+
+from retrieval.retrieve import retrieve
+from models.user_profile import build_user_profile
+
+# -------------------------------------------------
+# LOAD DATA
+# -------------------------------------------------
+reviews_path = os.path.join(BASE_DIR, "data", "processed", "reviews.csv")
+reviews = pd.read_csv(reviews_path)
+
+# -------------------------------------------------
+# NDCG@K
+# -------------------------------------------------
+def ndcg_at_k(recommended, relevant, k=10):
+
+    dcg = 0.0
+
+    for i, item in enumerate(recommended[:k]):
+        if item in relevant:
+            dcg += 1 / np.log2(i + 2)
+
+    ideal_hits = min(len(relevant), k)
+    idcg = sum([1 / np.log2(i + 2) for i in range(ideal_hits)])
+
+    return dcg / idcg if idcg > 0 else 0.0
+
+
+# -------------------------------------------------
+# HIT RATE@K
+# -------------------------------------------------
+def hit_rate_at_k(recommended, relevant, k=10):
+    return int(any(i in relevant for i in recommended[:k]))
+
+
+# -------------------------------------------------
+# RMSE (IMPROVED BASELINE)
+# -------------------------------------------------
+def compute_rmse():
+
+    if "stars" not in reviews.columns:
+        return None
+
+    global_mean = reviews["stars"].mean()
+
+    y_true = reviews["stars"].values
+    y_pred = np.full_like(y_true, global_mean, dtype=float)
+
+    return np.sqrt(mean_squared_error(y_true, y_pred))
+
+
+# -------------------------------------------------
+# EVALUATION CORE
+# -------------------------------------------------
+def evaluate_system(sample_users=50, k=10):
+
+    users = reviews["user_id"].dropna().unique()
+    users = np.random.choice(users, min(sample_users, len(users)), replace=False)
+
+    ndcg_scores = []
+    hit_scores = []
+
+    for user_id in users:
+
+        user_data = reviews[reviews["user_id"] == user_id]
+
+        if len(user_data) == 0:
+            continue
+
+        # -------------------------------------------------
+        # REALISTIC GROUND TRUTH
+        # -------------------------------------------------
+        relevant = set(user_data[user_data["stars"] >= 4]["business_id"])
+
+        if len(relevant) == 0:
+            continue
+
+        # -------------------------------------------------
+        # QUERY SIMULATION (agentic evaluation)
+        # -------------------------------------------------
+        try:
+            query = "recommend places"  # neutral evaluation query
+
+            result = retrieve(
+                query=query,
+                user_id=user_id,
+                k=k
+            )
+
+            recommended = [
+                r["business_id"]
+                for r in result.get("results", [])
+            ]
+
+            ndcg_scores.append(ndcg_at_k(recommended, relevant, k))
+            hit_scores.append(hit_rate_at_k(recommended, relevant, k))
+
+        except Exception as e:
+            print(f"⚠️ User {user_id} failed:", str(e))
+            continue
+
+    return {
+        "NDCG@10": round(np.mean(ndcg_scores), 4) if ndcg_scores else 0,
+        "HitRate@10": round(np.mean(hit_scores), 4) if hit_scores else 0,
+        "RMSE": round(compute_rmse(), 4) if compute_rmse() else None
+    }
+
+
+# -------------------------------------------------
+# RUN
+# -------------------------------------------------
+if __name__ == "__main__":
+
+    print("🚀 Running improved evaluation...\n")
+
+    results = evaluate_system(sample_users=50, k=10)
+
+    print("\n📊 FINAL RESULTS:")
+    for k, v in results.items():
+        print(f"{k}: {v}")
+
+===== FILE: ./project/models/review_generator.py =====
+import os
+import sys
+import json
+import random
+import pandas as pd
+import requests
+from dotenv import load_dotenv
+
+# -------------------------------------------------
+# ENV
+# -------------------------------------------------
+load_dotenv()
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+
+from models.user_profile import build_user_profile
+
+
+# -------------------------------------------------
+# DATA
+# -------------------------------------------------
+reviews_path = os.path.join(BASE_DIR, "data", "processed", "reviews.csv")
+businesses_path = os.path.join(BASE_DIR, "data", "processed", "businesses.csv")
+
+reviews = pd.read_csv(reviews_path)
+businesses = pd.read_csv(businesses_path)
+businesses.columns = [c.strip().lower() for c in businesses.columns]
+
+
+# -------------------------------------------------
+# OLLAMA CONFIG (.env driven)
+# -------------------------------------------------
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", 0.8))
+
+
+# -------------------------------------------------
+# HELPERS
+# -------------------------------------------------
+def get_business_name(biz):
+    return str(biz.get("name", "Unknown Business"))
+
+def get_business_category(biz):
+    return str(biz.get("categories") or biz.get("category") or "general")
+
+
+# -------------------------------------------------
+# CRITICAL FIX: SANITIZE USER PROFILE
+# (PREVENTS MODEL COPYING RAW STRUCTURE)
+# -------------------------------------------------
+def simplify_profile(profile):
+    rb = profile.get("rating_behavior", {})
+
+    return {
+        "avg_rating": float(rb.get("avg_rating", 3.5)),
+        "strictness": float(rb.get("strictness", 0.5)),
+        "variance": float(rb.get("variance", 0.7))
+    }
+
+
+# -------------------------------------------------
+# JSON PARSER (ROBUST)
+# -------------------------------------------------
+def extract_json(text):
+    if not text:
+        return None
+
+    text = text.strip()
+
+    try:
+        return json.loads(text)
+    except:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+
+    if start == -1 or end == -1:
+        return None
+
+    try:
+        return json.loads(text[start:end + 1])
+    except:
+        return None
+
+
+# -------------------------------------------------
+# OLLAMA CALL
+# -------------------------------------------------
+def call_ollama(prompt):
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        "options": {
+            "temperature": OLLAMA_TEMPERATURE,
+            "top_p": 0.95
+        }
+    }
+
+    r = requests.post(OLLAMA_URL, json=payload, timeout=60)
+
+    if r.status_code != 200:
+        raise Exception(r.text)
+
+    return r.json().get("response", "")
+
+
+# -------------------------------------------------
+# INTELLIGENT RATING MODEL
+# -------------------------------------------------
+def infer_rating(profile, category):
+    rb = profile.get("rating_behavior", {})
+
+    avg = float(rb.get("avg_rating", 3.6))
+    strictness = float(rb.get("strictness", 0.5))
+    variance = float(rb.get("variance", 0.7))
+
+    bias_map = {
+        "restaurant": 0.2,
+        "food": 0.2,
+        "hotel": 0.1,
+        "service": -0.1,
+        "tech": 0.0
+    }
+
+    bias = 0.0
+    for k, v in bias_map.items():
+        if k in category.lower():
+            bias = v
+
+    noise = random.uniform(-variance, variance)
+    score = avg + bias + noise
+
+    if strictness > 0.7:
+        score -= random.uniform(0.2, 0.6)
+    elif strictness < 0.3:
+        score += random.uniform(0.1, 0.5)
+
+    return max(1, min(5, round(score)))
+
+
+# -------------------------------------------------
+# CRITICAL FIX: STRONG PROMPT SEPARATION
+# -------------------------------------------------
+def build_prompt(profile, business, rating):
+
+    safe_profile = simplify_profile(profile)
+
+    return f"""
+You are writing a REAL HUMAN REVIEW.
+
+IMPORTANT:
+- User profile is ONLY behavioral signal
+- DO NOT output any profile fields
+- DO NOT output JSON structures from input
+
+USER BEHAVIOR SIGNALS:
+{json.dumps(safe_profile)}
+
+BUSINESS:
+Name: {business["name"]}
+Category: {business["categories"]}
+
+TASK:
+Write a believable 2–4 sentence review based on a real visit.
+
+The tone MUST match rating: {rating}
+
+ADDITIONAL STYLE REQUIREMENT (VERY IMPORTANT):
+- You MUST include EXACTLY ONE sentence written in OBVIOUS Nigerian Pidgin English
+- The Pidgin sentence must be clearly recognizable as Nigerian (e.g. "na so e be", "I no go lie", "the place dey ok but...")
+- The Pidgin sentence should NOT be subtle or mixed English — it must be clearly Pidgin
+- The remaining sentences must be standard English
+- Do NOT repeat multiple Pidgin sentences — ONLY ONE
+
+OUTPUT FORMAT (STRICT):
+{{
+  "review": "natural human review text only"
+}}
+
+RULES:
+- NO metadata
+- NO rating_behavior
+- NO sentiment_profile
+- NO explanations
+- ONLY the review text
+"""
+
+# -------------------------------------------------
+# FALLBACK (ONLY IF MODEL FAILS COMPLETELY)
+# -------------------------------------------------
+def fallback_review(name, rating):
+    tones = {
+        1: "terrible",
+        2: "below average",
+        3: "okay",
+        4: "good",
+        5: "excellent"
+    }
+
+    return (
+        f"My experience at {name} was {tones.get(rating)}. "
+        f"There were some noticeable aspects during the visit. "
+        f"I would {'not ' if rating <= 2 else ''}visit again."
+    )
+
+
+# -------------------------------------------------
+# OUTPUT VALIDATION (CRITICAL FIX)
+# -------------------------------------------------
+def is_valid_review(text):
+    if not text:
+        return False
+
+    banned = [
+        "rating_behavior",
+        "sentiment_profile",
+        "linguistic_style"
+    ]
+
+    for b in banned:
+        if b in text:
+            return False
+
+    return len(text.strip()) > 15
+
+
+# -------------------------------------------------
+# MAIN GENERATOR
+# -------------------------------------------------
+def generate_review(user_id, business_id):
+
+    used_fallback = False
+
+    try:
+        profile = build_user_profile(user_id)
+    except:
+        profile = {"rating_behavior": {}}
+
+    biz_df = businesses[businesses["business_id"].astype(str) == str(business_id)]
+
+    if biz_df.empty:
+        return {"success": False, "error": "Business not found"}
+
+    biz = biz_df.iloc[0]
+
+    name = get_business_name(biz)
+    category = get_business_category(biz)
+
+    rating = infer_rating(profile, category)
+
+    prompt = build_prompt(profile, biz, rating)
+
+    review = None
+
+    # retry loop (no premature fallback)
+    for _ in range(3):
+        raw = call_ollama(prompt)
+        parsed = extract_json(raw)
+
+        if parsed and is_valid_review(parsed.get("review")):
+            review = parsed["review"]
+            break
+
+    # ONLY fallback if model fully fails
+    if not review:
+        used_fallback = True
+        review = fallback_review(name, rating)
+
+    return {
+        "success": True,
+        "user_id": user_id,
+        "business_id": business_id,
+        "business_name": name,
+        # "category": category,
+        "rating": rating,
+        "review": review,
+        "model": OLLAMA_MODEL,
+        "temperature": OLLAMA_TEMPERATURE,
+        "used_fallback": used_fallback
+    }
+
+
+# -------------------------------------------------
+# TEST
+# -------------------------------------------------
+if __name__ == "__main__":
+
+    sample_user = reviews["user_id"].sample(1).values[0]
+    sample_business = businesses["business_id"].sample(1).values[0]
+
+    result = generate_review(sample_user, sample_business)
+    print(json.dumps(result, indent=2))
+
+===== FILE: ./project/models/__init__.py =====
+
+
+===== FILE: ./project/models/user_profile.py =====
+import os
+import numpy as np
+import pandas as pd
+import sys
+import json
+
+from utils.data_loader import load_reviews, load_businesses
+from models.behavior_model import (
+    compute_rating_behavior,
+    compute_category_bias,
+    compute_linguistic_style,
+    compute_sentiment_profile,
+    infer_traits
+)
+
+# -------------------------------------------------
+# LOAD DATA (CENTRALIZED)
+# -------------------------------------------------
+reviews = load_reviews()
+businesses = load_businesses()
+
+data = reviews.merge(businesses, on="business_id", how="left")
+
+
+# -------------------------------------------------
+# SAFE FLOAT
+# -------------------------------------------------
+def safe_float(x):
+    try:
+        if x is None:
+            return 0.0
+        if isinstance(x, float) and np.isnan(x):
+            return 0.0
+        return float(x)
+    except:
+        return 0.0
+
+
+# -------------------------------------------------
+# USER PROFILE BUILDER
+# -------------------------------------------------
+def build_user_profile(user_id):
+
+    user_data = data[data["user_id"] == user_id]
+
+    if user_data.empty:
+        return {
+            "user_id": user_id,
+            "rating_behavior": {"avg_rating": 3.5, "strictness": 0.5},
+            "linguistic_style": {},
+            "sentiment_profile": {},
+            "behavioral_traits": {},
+            "user_vector": np.array([3.5, 0.5, 0.5, 0, 0, 0, 0, 0, 0])
+        }
+
+    try:
+        from models.behavior_model import build_behavior_profile
+
+        profile = build_behavior_profile(user_id)
+
+    except Exception as e:
+        print("PROFILE ERROR:", e)
+
+        return {
+            "user_id": user_id,
+            "rating_behavior": {"avg_rating": 3.5, "strictness": 0.5},
+            "linguistic_style": {},
+            "sentiment_profile": {},
+            "behavioral_traits": {},
+            "user_vector": np.array([3.5, 0.5, 0.5, 0, 0, 0, 0, 0, 0])
+        }
+
+    return profile
+
+===== FILE: ./project/models/learning_ranker.py =====
+import numpy as np
+import json
+import os
+from sentence_transformers import SentenceTransformer
+
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
+WEIGHTS_PATH = "project/data/learning_weights.json"
+
+
+# -------------------------------------------------
+# LOAD / INIT WEIGHTS
+# -------------------------------------------------
+def load_weights():
+    if os.path.exists(WEIGHTS_PATH):
+        try:
+            with open(WEIGHTS_PATH, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    return {
+        "user_match": 1.25,
+        "rating_boost": 0.6,
+        "novelty_boost": 0.9,
+        "diversity_penalty": 0.35
+    }
+
+
+def save_weights(weights):
+    os.makedirs(os.path.dirname(WEIGHTS_PATH), exist_ok=True)
+    with open(WEIGHTS_PATH, "w") as f:
+        json.dump(weights, f, indent=2)
+
+
+# -------------------------------------------------
+# COSINE
+# -------------------------------------------------
+def cosine(a, b):
+    a = np.array(a)
+    b = np.array(b)
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
+
+
+# -------------------------------------------------
+# CORE SCORING FUNCTION
+# -------------------------------------------------
+def score_item(user_vec, item_vec, item, seen, weights, selected_vecs=None):
+
+    user_sim = cosine(user_vec, item_vec)
+
+    rating = float(item.get("stars", 3)) / 5.0
+
+    bid = str(item.get("business_id", ""))
+
+    novelty = 0.0 if bid in seen else 1.0
+
+    # diversity penalty (MMR-style)
+    diversity_penalty = 0.0
+    if selected_vecs:
+        diversity_penalty = max(cosine(item_vec, v) for v in selected_vecs)
+
+    score = (
+        weights["user_match"] * user_sim +
+        weights["rating_boost"] * rating +
+        weights["novelty_boost"] * novelty -
+        weights["diversity_penalty"] * diversity_penalty
+    )
+
+    return float(score)
+
+
+# -------------------------------------------------
+# MAIN AGENTIC RANKER
+# -------------------------------------------------
+def rank_businesses(user_id, query, candidates, user_profile=None, user_memory=None):
+
+    if not candidates:
+        return []
+
+    weights = load_weights()
+
+    # safe seen history
+    seen = set()
+    if isinstance(user_memory, dict):
+        seen = set(user_memory.get("seen_businesses", []))
+
+    # -------------------------------------------------
+    # USER VECTOR (FIXED + STABLE)
+    # avoids user collapse bug
+    # -------------------------------------------------
+    if user_profile:
+        base_text = json.dumps(user_profile, default=str)
+    else:
+        base_text = query
+
+    # inject identity to avoid cross-user leakage
+    base_text = f"{base_text} <USER:{user_id}>"
+
+    user_vec = embedder.encode(base_text)
+    user_vec = user_vec / (np.linalg.norm(user_vec) + 1e-9)
+
+    ranked = []
+    selected_vecs = []
+
+    # -------------------------------------------------
+    # SCORING LOOP
+    # -------------------------------------------------
+    for item in candidates:
+
+        text = f"{item.get('business_name','')} {item.get('text','')}"
+        item_vec = embedder.encode(text)
+        item_vec = item_vec / (np.linalg.norm(item_vec) + 1e-9)
+
+        score = score_item(
+            user_vec=user_vec,
+            item_vec=item_vec,
+            item=item,
+            seen=seen,
+            weights=weights,
+            selected_vecs=selected_vecs
+        )
+
+        ranked.append((score, item, item_vec))
+
+    # sort
+    ranked.sort(key=lambda x: x[0], reverse=True)
+
+    # -------------------------------------------------
+    # DIVERSIFIED TOP-K (MMR-lite)
+    # -------------------------------------------------
+    final = []
+    selected_vecs = []
+
+    for score, item, vec in ranked:
+
+        final.append(item)
+        selected_vecs.append(vec)
+
+        if len(final) >= 5:
+            break
+
+    return final
+
+
+# -------------------------------------------------
+# BACKWARD COMPATIBILITY
+# -------------------------------------------------
+def rank_items(items, user_vec, seen=None):
+
+    if seen is None:
+        seen = set()
+
+    weights = load_weights()
+
+    scored = []
+
+    for item in items:
+
+        text = f"{item.get('business_name','')} {item.get('text','')}"
+        item_vec = embedder.encode(text)
+        item_vec = item_vec / (np.linalg.norm(item_vec) + 1e-9)
+
+        score = score_item(
+            user_vec=user_vec,
+            item_vec=item_vec,
+            item=item,
+            seen=seen,
+            weights=weights
+        )
+
+        item["score"] = score
+        scored.append((score, item))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    return [x[1] for x in scored[:5]]
+
+===== FILE: ./project/models/behavior_model.py =====
+import re
+import numpy as np
+import pandas as pd
+from textblob import TextBlob
+import os
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+REVIEWS_PATH = os.path.join(BASE_DIR, "data", "processed", "reviews.csv")
+BUSINESSES_PATH = os.path.join(BASE_DIR, "data", "processed", "businesses.csv")
+
+reviews_df = pd.read_csv(REVIEWS_PATH)
+businesses_df = pd.read_csv(BUSINESSES_PATH)
+
+
+# -------------------------------------------------
+# SAFE SCALE
+# -------------------------------------------------
+def scale(x, min_v=0, max_v=1):
+    try:
+        x = float(x)
+    except:
+        return 0.0
+    return max(min((x - min_v) / (max_v - min_v + 1e-8), 1.0), 0.0)
+
+
+# -------------------------------------------------
+# SAFE CATEGORY COLUMN RESOLVER (🔥 FIX)
+# -------------------------------------------------
+def get_category_column(df: pd.DataFrame):
+    if df is None:
+        return None
+    if "categories" in df.columns:
+        return "categories"
+    if "category" in df.columns:
+        return "category"
+    return None
+
+
+# -------------------------------------------------
+# 1. RATING BEHAVIOR
+# -------------------------------------------------
+def compute_rating_behavior(user_reviews: pd.DataFrame):
+
+    ratings = user_reviews["stars"]
+
+    avg_rating = float(ratings.mean())
+    std_rating = float(ratings.std()) if len(ratings) > 1 else 0.0
+    variance = float(ratings.var()) if len(ratings) > 1 else 0.0
+
+    strictness = scale(1 - (std_rating / 2.5))
+
+    return {
+        "avg_rating": avg_rating,
+        "variance": variance,
+        "std": std_rating,
+        "min_rating": int(ratings.min()),
+        "max_rating": int(ratings.max()),
+        "strictness": strictness
+    }
+
+
+# -------------------------------------------------
+# 2. CATEGORY BIAS (🔥 FIXED SAFE VERSION)
+# -------------------------------------------------
+def compute_category_bias(user_reviews: pd.DataFrame, businesses: pd.DataFrame):
+
+    if user_reviews is None or businesses is None:
+        return {}
+
+    cat_col = get_category_column(businesses)
+
+    # ❗ HARD GUARD (THIS FIXES YOUR ERROR)
+    if cat_col is None:
+        return {}
+
+    merged = user_reviews.merge(
+        businesses,
+        on="business_id",
+        how="left"
+    )
+
+    if cat_col not in merged.columns:
+        return {}
+
+    merged[cat_col] = merged[cat_col].fillna("unknown")
+
+    global_avg = merged["stars"].mean()
+    category_bias = {}
+
+    for cat in merged[cat_col].unique():
+
+        cat_reviews = merged[merged[cat_col] == cat]
+
+        if len(cat_reviews) < 2:
+            continue
+
+        bias = float(cat_reviews["stars"].mean() - global_avg)
+        category_bias[cat] = scale(bias, -2, 2)
+
+    return category_bias
+
+
+# -------------------------------------------------
+# 3. LINGUISTIC STYLE
+# -------------------------------------------------
+def compute_linguistic_style(user_reviews: pd.DataFrame):
+
+    texts = user_reviews["text"].fillna("").astype(str)
+
+    total_reviews = len(texts)
+    total_words = sum(len(t.split()) for t in texts)
+
+    emoji_pattern = re.compile("[\U00010000-\U0010ffff]", flags=re.UNICODE)
+    emoji_count = sum(len(emoji_pattern.findall(t)) for t in texts)
+
+    pidgin_words = ["sha", "abeg", "no be", "wahala", "small small", "na", "omo"]
+
+    pidgin_count = sum(any(p in t.lower() for p in pidgin_words) for t in texts)
+
+    avg_length = total_words / max(total_reviews, 1)
+
+    return {
+        "avg_review_length": float(avg_length),
+        "emoji_rate": scale(emoji_count / max(total_words, 1)),
+        "pidgin_usage": scale(pidgin_count / max(total_reviews, 1)),
+        "formality": scale(1 - (pidgin_count / max(total_reviews, 1))),
+        "verbosity": "detailed" if avg_length > 25 else "concise"
+    }
+
+
+# -------------------------------------------------
+# 4. SENTIMENT
+# -------------------------------------------------
+def compute_sentiment_profile(user_reviews: pd.DataFrame):
+
+    sentiments = [
+        TextBlob(str(t)).sentiment.polarity
+        for t in user_reviews["text"].fillna("")
+    ]
+
+    sentiments = np.array(sentiments)
+
+    if len(sentiments) == 0:
+        return {}
+
+    return {
+        "avg_sentiment": float(sentiments.mean()),
+        "positivity_bias": scale(np.mean(sentiments > 0)),
+        "negativity_bias": scale(np.mean(sentiments < 0)),
+        "neutral_ratio": scale(np.mean(sentiments == 0))
+    }
+
+
+# -------------------------------------------------
+# 5. TRAITS
+# -------------------------------------------------
+def infer_traits(profile: dict):
+
+    ling = profile.get("linguistic_style", {})
+    rating = profile.get("rating_behavior", {})
+    sentiment = profile.get("sentiment_profile", {})
+
+    return {
+        "detail_oriented": scale(ling.get("avg_review_length", 0) / 40),
+        "price_sensitive": scale(rating.get("strictness", 0)),
+        "positive_reviewer": scale(sentiment.get("avg_sentiment", 0) + 0.5),
+        "critical_reviewer": scale(0.5 - sentiment.get("avg_sentiment", 0)),
+        "casual_style": scale(ling.get("pidgin_usage", 0))
+    }
+
+
+# -------------------------------------------------
+# 6. MAIN BUILDER
+# -------------------------------------------------
+def build_behavior_profile(user_input, businesses=None):
+
+    if isinstance(user_input, str):
+
+        user_reviews = reviews_df[reviews_df["user_id"] == user_input]
+        businesses = businesses_df
+
+    else:
+        user_reviews = user_input
+        if businesses is None:
+            businesses = businesses_df
+
+    if len(user_reviews) == 0:
+        return {
+            "rating_behavior": {"avg_rating": 3.5, "strictness": 0.5},
+            "linguistic_style": {},
+            "sentiment_profile": {},
+            "behavioral_traits": {}
+        }
+
+    rating_behavior = compute_rating_behavior(user_reviews)
+    category_bias = compute_category_bias(user_reviews, businesses)
+    linguistic_style = compute_linguistic_style(user_reviews)
+    sentiment_profile = compute_sentiment_profile(user_reviews)
+
+    profile = {
+        "rating_behavior": rating_behavior,
+        "linguistic_style": linguistic_style,
+        "sentiment_profile": sentiment_profile
+    }
+
+    profile["rating_behavior"]["category_bias"] = category_bias
+    profile["behavioral_traits"] = infer_traits(profile)
+
+    return profile
+
+===== FILE: ./project/models/planner.py =====
+
+
+===== FILE: ./project/models/rating_predictor.py =====
+
+
+===== FILE: ./project/app.py =====
+import os
+import json
+import requests
+import pandas as pd
+import sys
+import traceback
+
+from fastapi import FastAPI
+from pydantic import BaseModel
+from dotenv import load_dotenv
+
+# -------------------------------------------------
+# BASE PATH (FIXED FOR ALL ENVIRONMENTS)
+# -------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+
+from models.user_profile import build_user_profile
+from models.review_generator import generate_review
+from retrieval.retrieve import retrieve
+from rag.response_generator import generate_response
+
+# -------------------------------------------------
+# ENV
+# -------------------------------------------------
+load_dotenv()
+
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+
+# -------------------------------------------------
+# APP
+# -------------------------------------------------
+app = FastAPI(
+    title="TeamAI LLM Agent Hackathon API",
+    description="User Modeling + Review Generation + Agentic Recommendation System",
+    version="2.0.0"
+)
+
+# -------------------------------------------------
+# DATA PATHS (ROBUST)
+# -------------------------------------------------
+DATA_DIR = os.path.join(BASE_DIR, "data", "processed")
+
+reviews_df = None
+businesses_df = None
+
+
+def load_data():
+    """
+    Robust loader with clear fallback logging
+    """
+    global reviews_df, businesses_df
+
+    try:
+        reviews_path = os.path.join(DATA_DIR, "reviews.csv")
+        business_path = os.path.join(DATA_DIR, "businesses.csv")
+
+        print("🔍 Looking for data in:", DATA_DIR)
+
+        if os.path.exists(reviews_path):
+            reviews_df = pd.read_csv(reviews_path)
+            print("✅ Loaded reviews.csv")
+
+        else:
+            print("⚠️ Missing reviews.csv at:", reviews_path)
+
+        if os.path.exists(business_path):
+            businesses_df = pd.read_csv(business_path)
+            print("✅ Loaded businesses.csv")
+
+        else:
+            print("⚠️ Missing businesses.csv at:", business_path)
+
+    except Exception as e:
+        print("❌ DATA LOAD ERROR:", str(e))
+
+
+@app.on_event("startup")
+def startup():
+    load_data()
+
+# -------------------------------------------------
+# REQUEST MODELS
+# -------------------------------------------------
+class ReviewRequest(BaseModel):
+    user_id: str
+    business_id: str
+
+
+class ProfileRequest(BaseModel):
+    user_id: str
+
+
+class RecommendRequest(BaseModel):
+    query: str
+    user_id: str
+
+# -------------------------------------------------
+# RESPONSE WRAPPER
+# -------------------------------------------------
+def safe_response(success=True, data=None, error=None):
+    return {
+        "success": success,
+        "data": data,
+        "error": error
+    }
+
+# -------------------------------------------------
+# HOME
+# -------------------------------------------------
+@app.get("/")
+def home():
+    return safe_response(data={
+        "message": "LLM Agent API Running ✔",
+        "architecture": "Agentic Retrieval + User Modeling + RAG",
+        "version": "2.0.0"
+    })
+
+# -------------------------------------------------
+# SAMPLES (FIXED DATA ISSUE)
+# -------------------------------------------------
+@app.get("/samples")
+def samples():
+    try:
+        load_data()
+
+        import random
+
+        if reviews_df is None or businesses_df is None:
+            return safe_response(
+                success=False,
+                error="Data not loaded. Check /data/processed folder."
+            )
+
+        random_user = random.choice(reviews_df["user_id"].tolist())
+        random_business = businesses_df.sample(1).iloc[0]
+
+        return safe_response(data={
+            "random_user_id": random_user,
+            "random_business": {
+                "name": random_business["name"],
+                "business_id": random_business["business_id"]
+            }
+        })
+
+    except Exception as e:
+        return safe_response(success=False, error=str(e))
+
+# -------------------------------------------------
+# PROFILE
+# -------------------------------------------------
+@app.post("/profile")
+def profile(req: ProfileRequest):
+    try:
+        return safe_response(data=build_user_profile(req.user_id))
+    except Exception as e:
+        return safe_response(success=False, error=str(e))
+
+# -------------------------------------------------
+# REVIEW
+# -------------------------------------------------
+@app.post("/review")
+def review(req: ReviewRequest):
+    try:
+        result = generate_review(req.user_id, req.business_id)
+        return safe_response(data=result)
+    except Exception as e:
+        return safe_response(success=False, error=str(e))
+
+# -------------------------------------------------
+# RECOMMEND (CLEAN AGENT PIPELINE)
+# -------------------------------------------------
+@app.post("/recommend")
+def recommend(req: RecommendRequest):
+
+    try:
+        # STEP 1: retrieval (ONLY ranking layer)
+        retrieved = retrieve(
+            query=req.query,
+            user_id=req.user_id,
+            k=5,
+            use_llm=False
+        )
+
+        results = retrieved.get("results", [])
+
+        if not results:
+            return safe_response(data={
+                "query": req.query,
+                "user_id": req.user_id,
+                "recommendations": [],
+                "ai_response": {
+                    "success": False,
+                    "response": "No results found"
+                }
+            })
+
+        # STEP 2: user context (NOT scoring)
+        try:
+            profile = build_user_profile(req.user_id)
+        except:
+            profile = {}
+
+        # STEP 3: LLM reasoning layer (explanation only)
+        try:
+            ai_response = generate_response(
+                req.query,
+                results,
+                req.user_id
+            )
+        except Exception as e:
+            ai_response = {
+                "success": False,
+                "response": "LLM fallback mode - ranked results only",
+                "error": str(e)
+            }
+
+        return safe_response(data={
+            "query": req.query,
+            "user_id": req.user_id,
+            # "recommendations": results,
+            "ai_response": ai_response,
+            "profile_loaded": bool(profile)
+        })
+
+    except Exception as e:
+        return safe_response(
+            success=False,
+            error=str(e),
+            data={"trace": traceback.format_exc()}
+        )
+
+# -------------------------------------------------
+# LLM STATUS
+# -------------------------------------------------
+@app.get("/llm-status")
+def llm_status():
+
+    try:
+        r = requests.get("http://localhost:11434/api/tags", timeout=5)
+
+        if r.status_code != 200:
+            return safe_response(data={
+                "status": "unhealthy",
+                "ollama_running": False
+            })
+
+        models = r.json().get("models", [])
+        model_list = [m.get("name") for m in models]
+
+        is_ready = OLLAMA_MODEL in model_list
+
+        return safe_response(data={
+            "status": "healthy" if is_ready else "degraded",
+            "ollama_running": True,
+            "model_loaded": is_ready,
+            "expected_model": OLLAMA_MODEL,
+            "available_models": model_list
+        })
+
+    except Exception as e:
+        return safe_response(data={
+            "status": "unhealthy",
+            "error": str(e)
+        })
+
+===== FILE: ./project/requirements.txt =====
+fastapi
+uvicorn
+numpy
+pandas
+faiss-cpu
+sentence-transformers
+scikit-learn
+python-dotenv
+requests
+textblob
+
+===== FILE: ./project/api/routes.py =====
+
+
+===== FILE: ./project/docker-compose.yml =====
+version: "3.9"
+
+services:
+
+  ollama:
+    image: ollama/ollama
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./project
+      dockerfile: Dockerfile
+    container_name: llm-agent-api
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_URL=http://ollama:11434/api/generate
+      - OLLAMA_MODEL=llama3.2:1b
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+
+===== FILE: ./project/data/download_data.sh =====
+#!/bin/bash
+
+set -e  # stop if anything fails
+
+DATA_DIR="project/data/raw"
+
+mkdir -p "$DATA_DIR"
+
+echo "🚀 Downloading Yelp dataset..."
+
+# -----------------------
+# Download
+# -----------------------
+wget -O "$DATA_DIR/business.json.zip" "https://storage.googleapis.com/kaggle-data-sets/4865078/8209747/compressed/yelp_dataset/yelp_academic_dataset_business.json.zip?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=gcp-kaggle-com%40kaggle-161607.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T151329Z&X-Goog-Expires=259200&X-Goog-SignedHeaders=host&X-Goog-Signature=73ca70d0db8402a51b3acb8d412e0c9b465e0da764c4644a2e16db75527bbd86d88045b6a32fb6a218d31ff31993f7ee039d54033680f51517ab545d1a39d22c13ba56be48a4a08dab5819164264b8bcd19c36fc4c12a34f10bd69d2a3583e6240b170202b8e9b3259bf51a6d37e106aefdb1a2d700c61c947840b2e1f229955236f2387f72d2bc80ee6a3195e3e0b0eed71dc070f53e791a94ee072544ab2e61054a2f9f7182d181c19aa39ce4ee6601ae40c13989963a12445f3f2f0fbbaa39204e1818a7664d9723c66034654b8684e8885f7142744cbb1fa0df94dc1dc50beaca34adf4f08ba2895133c8b409af0bf1f252800aafaf54d55ef716a9dd097"
+wget -O "$DATA_DIR/review.json.zip" "https://storage.googleapis.com/kaggle-data-sets/4865078/8209747/compressed/yelp_dataset/yelp_academic_dataset_review.json.zip?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=gcp-kaggle-com%40kaggle-161607.iam.gserviceaccount.com%2F20260506%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260506T175313Z&X-Goog-Expires=259200&X-Goog-SignedHeaders=host&X-Goog-Signature=6793ee425dcce80a5ae660cebb71d668e28ccc43cdaec906c4b033565db4188ca8107988c87ae5ebf637866c20284e93f7f144842d29d727bbe8b561169caf16830f02f4e14129fd3c5944aff210ecc503bd140b9a7f5cb84bbb86aa67b2183e051433609f4694b819744965e3261d6a1badc83ad8bcf10e43418090dd12f6afe65deb4752363aa17a59d7d361f07fcd94ebcfe0308328827597a5430a800c537fecd86903ede58d221fef5daadc1308784a3fa7270a6b6898b68912c894e393034db866c9dd07537a75473a09fdf0e6403e71bb52a36de9600f8e9ebe438da179f93dea3dc4426e279f11cef59d63928bdc9a6e777ba839e11a2c6dd59bd025"
+wget -O "$DATA_DIR/user.json.zip" "https://storage.googleapis.com/kaggle-data-sets/4865078/8209747/compressed/yelp_dataset/yelp_academic_dataset_user.json.zip?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=gcp-kaggle-com%40kaggle-161607.iam.gserviceaccount.com%2F20260506%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260506T175340Z&X-Goog-Expires=259200&X-Goog-SignedHeaders=host&X-Goog-Signature=55d1851492b6cf0e0f011b950a68c1dcfec5b2697c69f07455244959724e1ae64dc425bed841d17f982e08156f6b6a320229f3bb72b9ebce824892778272f44759f79d0f6078e26013d5d3735c4d42bd93e66b68eee616be396cdd2400a3b9369be4df87cbaeb6b3ad3ddcb77ee5a68e45649277de4c3ff11fd628341a747b8e099a80abcad7b6aa0aa3fa5672b3ab7afe975c7f4d0ef48d20f801649bb2bd9e81c6d874491f28b68433c54aceff99b8ad53f87f16fe15b4911e643070ef77e4ffdf5634d92534d4b242e3dc1f54435a929d800b6baaa9465e7e4af9c6ca604e6f752fa68710a47c393811c9662e8275080bd0bf1b281b4fe26778adf92a4e8d"
+
+
+echo "📦 Unzipping files..."
+
+# -----------------------
+# Unzip
+# -----------------------
+unzip -o "$DATA_DIR/business.json.zip" -d "$DATA_DIR"
+unzip -o "$DATA_DIR/review.json.zip" -d "$DATA_DIR"
+unzip -o "$DATA_DIR/user.json.zip" -d "$DATA_DIR"
+
+
+echo "🧹 Removing zip files..."
+
+# -----------------------
+# Cleanup zip files
+# -----------------------
+rm "$DATA_DIR"/*.zip
+
+
+echo "🏷️ Renaming files..."
+
+# -----------------------
+# Rename to clean format
+# -----------------------
+mv "$DATA_DIR"/yelp_academic_dataset_business.json "$DATA_DIR/business.json"
+mv "$DATA_DIR"/yelp_academic_dataset_review.json "$DATA_DIR/review.json"
+mv "$DATA_DIR"/yelp_academic_dataset_user.json "$DATA_DIR/user.json"
+
+
+echo "✅ Done. Dataset is ready!"
+
+===== FILE: ./project/data/__init__.py =====
+
+
+===== FILE: ./project/data/user_memory.json =====
+{
+  "epQ-tZ2wneTGITGABqv01Q": {
+    "recent_queries": [
+      "best travel agent",
+      "best travel agent"
+    ]
+  },
+  "UhN9RrW19vz7vFWgWVLn_w": {
+    "recent_queries": [
+      "best travel agent",
+      "best travel agent"
+    ],
+    "seen_businesses": [
+      "znTKlh4x8NoBIojm4Yo5hA",
+      "mmBwAe9q062vKWanRfoagQ",
+      "26rvYn1RPbJCBW-cW05xnQ",
+      "g2LzskhiQtvYxNvAJK7Vig",
+      "e-Ve1GkV0esUdUP4B6uPWA",
+      "nTry5c0z1cn4kT4OBiSEAw",
+      "J-ciDDEdIHMcChGIyKZnOg",
+      "2W7n0OxSfwseTHcJT8aLFw"
+    ]
+  },
+  "_BcWyKQL16ndpBdggh2kNA": {
+    "seen_businesses": [
+      "nTry5c0z1cn4kT4OBiSEAw",
+      "J-ciDDEdIHMcChGIyKZnOg",
+      "2W7n0OxSfwseTHcJT8aLFw"
+    ]
+  },
+  "T65MUTdDVeSQx4mQBSglNg": {
+    "seen_businesses": [
+      "nTry5c0z1cn4kT4OBiSEAw",
+      "J-ciDDEdIHMcChGIyKZnOg",
+      "2W7n0OxSfwseTHcJT8aLFw"
+    ]
+  },
+  "zPxvMIlv0W0HgTlMoU-WaQ": {
+    "seen_businesses": [
+      "J-ciDDEdIHMcChGIyKZnOg",
+      "2W7n0OxSfwseTHcJT8aLFw",
+      "nTry5c0z1cn4kT4OBiSEAw"
+    ]
+  },
+  "juydCZehXvOmDrzAc8rokQ": {
+    "seen_businesses": [
+      "J-ciDDEdIHMcChGIyKZnOg",
+      "2W7n0OxSfwseTHcJT8aLFw",
+      "nTry5c0z1cn4kT4OBiSEAw",
+      "N-MVwAcmsQDZCxbZjZhPDA",
+      "9kjDMcm9zesdk5b-MQp0iw",
+      "4l0kpD6XJEoJW8FKpBmobA",
+      "TkQy8DWCUBtcrmHYtR87uQ"
+    ]
+  },
+  "KT9-Emtiqng5VDgYy9oF9w": {
+    "seen_businesses": [
+      "9kjDMcm9zesdk5b-MQp0iw",
+      "N-MVwAcmsQDZCxbZjZhPDA",
+      "4l0kpD6XJEoJW8FKpBmobA",
+      "TkQy8DWCUBtcrmHYtR87uQ"
+    ]
+  },
+  "rhqyJ9sN-lb2JblkVFe13A": {
+    "seen_businesses": [
+      "M5rj-zpkCHcGXTxBbcrDXQ",
+      "t1qF12NdW8KvCqxqbvy-Hg",
+      "kFxHQcrCEycaWLEOkkoE1A",
+      "htO_nlxkEsYHzDrtbiUxew",
+      "n6reYUBVF9buglcojgB0FQ"
+    ]
+  },
+  "1wPYK23OkWMfpPfj_Gp5_Q": {
+    "seen_businesses": [
+      "5xokROlB8Zo5T-_qbHzsrQ",
+      "VZFQS0SXzXPuxISbAgIVBA",
+      "htO_nlxkEsYHzDrtbiUxew",
+      "VCjvaX_78oEKG3I9oTJEag",
+      "-kY_HDP7IMvGl-kBIZVU4A"
+    ]
+  },
+  "RNaWSwmUbyvdJeLbV-UsUQ": {
+    "seen_businesses": [
+      "htO_nlxkEsYHzDrtbiUxew",
+      "5xokROlB8Zo5T-_qbHzsrQ",
+      "VZFQS0SXzXPuxISbAgIVBA",
+      "VCjvaX_78oEKG3I9oTJEag",
+      "-kY_HDP7IMvGl-kBIZVU4A",
+      "2dlQX5sP9X6Dlm1MmNOlSw",
+      "CPFKi2lZJazP6IdtCdDDyg",
+      "t1qF12NdW8KvCqxqbvy-Hg"
+    ]
+  },
+  "gfa0_Ah57zNJcevRChdEIw": {
+    "seen_businesses": [
+      "T4-vocFpzwlIxAQIi22FFA",
+      "n5P6-HWN3kFSYBxfVfDxEg",
+      "SlGNxQI23jc9iTZNTs_I3g",
+      "3Y2mZ6CJmGOxD9eHM5NfOw",
+      "hS6KNGCQVTYUdLb2edt58g"
+    ]
+  },
+  "yLvhLeOV00VW_Ctoq-3IEA": {
+    "seen_businesses": [
+      "9xgHivXmL1Vzaz5P97PzCg",
+      "5_sby6qh9I6rwnSuoURSaQ",
+      "E-rQsSrYeNBNT2Z3pXmd-g",
+      "GmomRGW_omclyKXKDppsIg"
+    ]
+  },
+  "a1xbZ-UTFf2pk8s69oGmgg": {
+    "seen_businesses": [
+      "V-C2GNP-I6gfq1kBCoxhmQ",
+      "tYpbg6hKC1gbbnh-eUcwIQ",
+      "5_sby6qh9I6rwnSuoURSaQ",
+      "Z90LhF6RqwI4o72V2elP6w",
+      "0-Tim4ucmy8bNugnzKXG8g",
+      "sr-5EY6bmp4jINhea06MjA"
+    ]
+  },
+  "IIT1OKuA_0kGBYSOB-CFsg": {
+    "seen_businesses": [
+      "Z90LhF6RqwI4o72V2elP6w",
+      "0-Tim4ucmy8bNugnzKXG8g",
+      "sr-5EY6bmp4jINhea06MjA"
+    ]
+  },
+  "AvxDvQgdmbYet6mGP6rWhg": {
+    "seen_businesses": [
+      "A9rVxmIBtHZRvNhbBaGAWg",
+      "VgGITb54IIb1G0gSVt3gkw",
+      "n-zmzYYOC00m9vgoIK-Bow"
+    ]
+  },
+  "MdUimpfJQHijcy1DZu-r4A": {
+    "seen_businesses": [
+      "WrNg2bDzC2LpXdsk6dn6uA",
+      "xUAFZts8ULcAxJZICEAxaQ",
+      "69Gh8Vf8MFbD6bbKBv8_og"
+    ]
+  },
+  "lcp3WgYyYRfcqewpilwmyg": {
+    "seen_businesses": [
+      "u_3Fu4wROCAzMwMoVdMVqw",
+      "BgExC6utFsEhgyUqtw_ppg",
+      "lcHOygMDW0MJHR0GIGhpiw",
+      "kD4U5cK48HTodDFqYOaBXw",
+      "9zaXFApfobvEKgfGt-NUxA",
+      "Q3udDlBSVCvZSqsFtIgMLg"
+    ]
+  },
+  "jlhFRMQQJkOrRwEwWyeXIA": {
+    "seen_businesses": [
+      "kD4U5cK48HTodDFqYOaBXw",
+      "9zaXFApfobvEKgfGt-NUxA",
+      "Q3udDlBSVCvZSqsFtIgMLg"
+    ]
+  }
+}
+
+===== FILE: ./project/data/process_data.py =====
+import pandas as pd
+import json
+
+def load_sample(path, n=100000):
+    data = []
+
+    with open(path, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if i >= n:
+                break
+
+            try:
+                data.append(json.loads(line))  # ✅ SAFE PARSING
+            except json.JSONDecodeError:
+                continue  # skip broken lines instead of crashing
+
+    return pd.DataFrame(data)
+
+
+# Load datasets (sampled to avoid memory crash)
+reviews = load_sample("data/raw/review.json", 100000)
+businesses = load_sample("data/raw/business.json", 50000)
+users = load_sample("data/raw/user.json", 50000)
+
+# Keep only needed columns (with safety checks)
+reviews = reviews[["user_id", "business_id", "stars", "text"]]
+
+businesses = businesses[["business_id", "name", "categories"]]
+
+users = users[["user_id", "average_stars", "review_count"]]
+
+# Save processed data
+reviews.to_csv("data/processed/reviews.csv", index=False)
+businesses.to_csv("data/processed/businesses.csv", index=False)
+users.to_csv("data/processed/users.csv", index=False)
+
+print("Done processing sample data ✔")
+
+===== FILE: ./project/training/feature_engineering.py =====
+
+
+===== FILE: ./project/training/train_rating_model.py =====
+
+
+===== FILE: ./project/.dockerignore =====
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+data/raw
+data/embeddings/*.npy
+.git
+
+===== FILE: ./project/retrieval/faiss_index.py =====
+import os
+import faiss
+import numpy as np
+import pandas as pd
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+EMB_PATH = os.path.join(BASE_DIR, "data", "embeddings", "review_embeddings.npy")
+META_PATH = os.path.join(BASE_DIR, "data", "embeddings", "reviews_with_ids.csv")
+
+INDEX_PATH = os.path.join(BASE_DIR, "data", "embeddings", "faiss.index")
+BUSINESS_PATH = os.path.join(BASE_DIR, "data", "processed", "businesses.csv")
+
+# -------------------------------------------------
+# NORMALIZATION (CRITICAL FOR COSINE)
+# -------------------------------------------------
+def normalize(vectors):
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-8
+    return vectors / norms
+
+
+# -------------------------------------------------
+# BUILD REVIEW INDEX (CORE RETRIEVAL LAYER)
+# -------------------------------------------------
+def build_review_index():
+
+    embeddings = np.load(EMB_PATH).astype("float32")
+    embeddings = normalize(embeddings)
+
+    dim = embeddings.shape[1]
+
+    index = faiss.IndexFlatIP(dim)
+    index.add(embeddings)
+
+    faiss.write_index(index, INDEX_PATH)
+
+    print(f"[OK] Review FAISS index built: {index.ntotal} vectors")
+
+
+# -------------------------------------------------
+# BUILD BUSINESS INDEX (🔥 INTELLIGENCE UPGRADE)
+# -------------------------------------------------
+def build_business_index():
+
+    businesses = pd.read_csv(BUSINESS_PATH)
+
+    businesses["business_id"] = businesses["business_id"].astype(str).str.strip()
+
+    # combine semantic signals
+    business_texts = (
+        businesses["name"].fillna("") + " " +
+        businesses["categories"].fillna("")
+    ).values
+
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+
+    embeddings = model.encode(business_texts, convert_to_numpy=True).astype("float32")
+    embeddings = normalize(embeddings)
+
+    dim = embeddings.shape[1]
+
+    index = faiss.IndexFlatIP(dim)
+    index.add(embeddings)
+
+    business_index_path = os.path.join(BASE_DIR, "data", "embeddings", "business_faiss.index")
+
+    faiss.write_index(index, business_index_path)
+
+    print(f"[OK] Business FAISS index built: {index.ntotal} vectors")
+
+
+# -------------------------------------------------
+# LOAD INDEX
+# -------------------------------------------------
+def load_index(path=INDEX_PATH):
+    return faiss.read_index(path)
+
+
+# -------------------------------------------------
+# HYBRID BUILD (RECOMMENDED)
+# -------------------------------------------------
+def build_all():
+
+    print("Building review index...")
+    build_review_index()
+
+    print("Building business index...")
+    build_business_index()
+
+    print("DONE ✔")
+
+
+# -------------------------------------------------
+# ENTRY
+# -------------------------------------------------
+if __name__ == "__main__":
+    build_all()
+
+===== FILE: ./project/retrieval/embed_reviews.py =====
+import os
+import pandas as pd
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+BASE_DIR = os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)
+
+DATA_PATH = os.path.join(BASE_DIR, "data", "processed", "reviews.csv")
+OUTPUT_PATH = os.path.join(BASE_DIR, "data", "embeddings")
+
+os.makedirs(OUTPUT_PATH, exist_ok=True)
+
+df = pd.read_csv(DATA_PATH)
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# clean text
+df["text"] = df["text"].fillna("").astype(str)
+
+print("Generating embeddings...")
+
+embeddings = model.encode(
+    df["text"].tolist(),
+    show_progress_bar=True,
+    normalize_embeddings=True
+)
+
+np.save(os.path.join(OUTPUT_PATH, "review_embeddings.npy"), embeddings)
+df.to_csv(os.path.join(OUTPUT_PATH, "reviews_with_ids.csv"), index=False)
+
+print("Done ✔")
+
+===== FILE: ./project/retrieval/retrieve.py =====
+import os
+import sys
+import numpy as np
+import pandas as pd
+import faiss
+from sentence_transformers import SentenceTransformer
+
+# -------------------------------------------------
+# PATH SETUP
+# -------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+
+from models.user_profile import build_user_profile
+from utils.data_loader import load_businesses
+
+# -------------------------------------------------
+# MODEL
+# -------------------------------------------------
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# -------------------------------------------------
+# DATA PATHS
+# -------------------------------------------------
+META_PATH = os.path.join(BASE_DIR, "data", "embeddings", "reviews_with_ids.csv")
+INDEX_PATH = os.path.join(BASE_DIR, "data", "embeddings", "faiss.index")
+
+# -------------------------------------------------
+# LOAD DATA
+# -------------------------------------------------
+df = pd.read_csv(META_PATH)
+
+businesses = load_businesses()
+businesses.columns = businesses.columns.str.strip()
+
+# -------------------------------------------------
+# SAFE BUSINESS MAPS
+# -------------------------------------------------
+if "business_id" in businesses.columns:
+    businesses["business_id"] = businesses["business_id"].astype(str).str.strip()
+else:
+    raise ValueError("businesses.csv missing 'business_id' column")
+
+business_name_map = dict(zip(
+    businesses["business_id"],
+    businesses.get("name", "").fillna("Unknown")
+))
+
+business_cat_map = dict(zip(
+    businesses["business_id"],
+    businesses.get("categories", "").fillna("").astype(str).str.strip()
+))
+
+# -------------------------------------------------
+# LOAD FAISS INDEX
+# -------------------------------------------------
+index = faiss.read_index(INDEX_PATH)
+
+# -------------------------------------------------
+# SAFE UTILITIES
+# -------------------------------------------------
+def safe_float(x):
+    try:
+        if x is None:
+            return 0.0
+        if isinstance(x, float) and np.isnan(x):
+            return 0.0
+        return float(x)
+    except:
+        return 0.0
+
+
+def l2norm(v):
+    v = np.array(v)
+    return v / (np.linalg.norm(v) + 1e-8)
+
+
+def cosine(a, b):
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
+
+
+# -------------------------------------------------
+# EMBEDDING
+# -------------------------------------------------
+def embed_item(text: str):
+    return l2norm(model.encode([str(text)])[0])
+
+
+# -------------------------------------------------
+# BASE SCORE
+# -------------------------------------------------
+def base_score(dist):
+    return 1 / (1 + float(dist))
+
+
+# -------------------------------------------------
+# USER SCORING (SAFE SCALAR ONLY)
+# -------------------------------------------------
+def compute_user_score(item, profile):
+
+    score = safe_float(item.get("score", 0))
+
+    traits = profile.get("behavioral_traits", {})
+    sentiment = profile.get("sentiment_profile", {})
+    rating = profile.get("rating_behavior", {})
+
+    rating_gap = abs(
+        safe_float(item.get("stars", 3)) -
+        safe_float(rating.get("avg_rating", 3))
+    )
+
+    score *= (1 - rating_gap * 0.20)
+    score *= (1 + safe_float(rating.get("strictness", 0.5)) * 0.25)
+    score *= (1 + safe_float(sentiment.get("avg_sentiment", 0)) * 0.15)
+
+    if traits.get("positive_reviewer"):
+        score *= 1.08
+    if traits.get("critical_reviewer"):
+        score *= 0.85
+    if traits.get("detail_oriented"):
+        score *= 1.10
+
+    return float(score)
+
+
+# -------------------------------------------------
+# DIVERSITY (MMR)
+# -------------------------------------------------
+def diversify(results, k):
+
+    if not results:
+        return []
+
+    selected = []
+    candidates = results.copy()
+
+    while len(selected) < k and candidates:
+
+        best = None
+        best_score = -1
+
+        for c in candidates:
+
+            relevance = c["score"]
+
+            if not selected:
+                diversity_penalty = 0
+            else:
+                diversity_penalty = max(
+                    cosine(c["vec"], s["vec"])
+                    for s in selected
+                )
+
+            mmr = 0.75 * relevance - 0.25 * diversity_penalty
+
+            if mmr > best_score:
+                best_score = mmr
+                best = c
+
+        selected.append(best)
+        candidates.remove(best)
+
+    return selected
+
+
+# -------------------------------------------------
+# MAIN RETRIEVE FUNCTION
+# -------------------------------------------------
+def retrieve(query, user_id=None, k=5, use_llm=True):
+
+    query_emb = embed_item(query)
+
+    profile = None
+
+    if user_id:
+        try:
+            profile = build_user_profile(user_id)
+        except Exception:
+            profile = None
+
+    distances, indices = index.search(query_emb.reshape(1, -1), k * 30)
+
+    results = []
+
+    for idx, dist in zip(indices[0], distances[0]):
+
+        if idx < 0 or idx >= len(df):
+            continue
+
+        row = df.iloc[idx]
+
+        bid = str(row.get("business_id", "")).strip()
+
+        name = business_name_map.get(bid, "Unknown")
+        category = business_cat_map.get(bid, "")
+        text = str(row.get("text", ""))
+
+        # ✅ IMPORTANT: categories injected into embedding (LEARNED, NOT RULED)
+        full_text = f"{name} {category} {text}"
+
+        item_vec = embed_item(full_text)
+
+        review_score = base_score(float(dist))
+        semantic_alignment = cosine(query_emb, item_vec)
+
+        score = review_score + semantic_alignment * 0.30
+
+        results.append({
+            "business_id": bid,
+            "business_name": name,
+            "category": category,
+            "text": text,
+            "stars": safe_float(row.get("stars", 0)),
+            "score": float(score),
+            "vec": item_vec
+        })
+
+    # -------------------------------------------------
+    # PERSONALIZATION (NO VECTOR MIXING)
+    # -------------------------------------------------
+    if profile:
+
+        for r in results:
+
+            r["score"] = (
+                compute_user_score(r, profile) * 0.70 +
+                r["score"] * 0.30
+            )
+
+    # -------------------------------------------------
+    # SORT + DIVERSIFY
+    # -------------------------------------------------
+    results.sort(key=lambda x: x["score"], reverse=True)
+
+    final = diversify(results, k)
+
+    # -------------------------------------------------
+    # CLEAN OUTPUT
+    # -------------------------------------------------
+    return {
+        "query": str(query),
+        "results": [
+            {
+                "business_id": str(r["business_id"]),
+                "business_name": str(r["business_name"]),
+                "stars": float(r["stars"]),
+                "score": float(r["score"])
+            }
+            for r in final[:3]
+        ]
+    }
+
+===== FILE: ./project/rag/response_generator.py =====
+import requests
+import os
+import json
+import numpy as np
+import hashlib
+from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
+
+import sys
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+
+from models.user_profile import build_user_profile
+from models.learning_ranker import rank_businesses
+
+load_dotenv()
+
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
+USER_MEMORY_PATH = os.path.join(BASE_DIR, "data", "user_memory.json")
+
+
+# -------------------------------------------------
+# MEMORY
+# -------------------------------------------------
+def load_user_memory():
+    if os.path.exists(USER_MEMORY_PATH):
+        with open(USER_MEMORY_PATH, "r") as f:
+            return json.load(f)
+    return {}
+
+
+def save_user_memory(memory):
+    os.makedirs(os.path.dirname(USER_MEMORY_PATH), exist_ok=True)
+    with open(USER_MEMORY_PATH, "w") as f:
+        json.dump(memory, f, indent=2)
+
+
+def update_user_memory(user_id, query, response_text):
+    memory = load_user_memory()
+
+    if user_id not in memory:
+        memory[user_id] = {
+            "recent_queries": [],
+            "seen_businesses": [],
+            "style_vector": None,
+            "feedback_log": []
+        }
+
+    memory[user_id]["recent_queries"].append(query)
+    memory[user_id]["recent_queries"] = memory[user_id]["recent_queries"][-30:]
+
+    text_blob = " ".join(memory[user_id]["recent_queries"])
+    memory[user_id]["style_vector"] = embedder.encode(text_blob).tolist()
+
+    save_user_memory(memory)
+
+
+# -------------------------------------------------
+# CONTEXT CLEANING
+# -------------------------------------------------
+def format_context(results):
+    if not isinstance(results, list):
+        return []
+    return [r for r in results if isinstance(r, dict)]
+
+
+# -------------------------------------------------
+# VECTOR BUILD (USER PERSONALIZATION CORE FIX)
+# -------------------------------------------------
+def build_user_vector(profile, memory, user_id, query):
+    """
+    FIX:
+    Previously all users had similar vectors → identical rankings.
+
+    Now we blend:
+    - structured profile
+    - query intent
+    - user history (memory style vector)
+    """
+
+    profile_text = json.dumps(profile, default=str) if profile else ""
+
+    mem_vec = None
+    if user_id and memory.get(user_id, {}).get("style_vector"):
+        mem_vec = np.array(memory[user_id]["style_vector"])
+
+    query_vec = embedder.encode(query)
+
+    profile_vec = embedder.encode(profile_text) if profile_text else np.zeros_like(query_vec)
+
+    # combine signals
+    if mem_vec is not None:
+        combined = (0.4 * profile_vec) + (0.4 * query_vec) + (0.2 * mem_vec)
+    else:
+        combined = (0.6 * profile_vec) + (0.4 * query_vec)
+
+    return combined
+
+
+# -------------------------------------------------
+# SELF-LEARNING RERANK
+# -------------------------------------------------
+def learning_rerank(query, items, user_id, profile, memory):
+
+    user_memory = memory.get(user_id, {}) if user_id else {}
+
+    return rank_businesses(
+        user_id=user_id,
+        query=query,
+        candidates=items,
+        user_profile=profile,
+        user_memory=user_memory
+    )
+
+
+# -------------------------------------------------
+# STABLE VARIATION
+# -------------------------------------------------
+def stable_noise(user_id, query):
+    seed = hashlib.md5((str(user_id) + query).encode()).hexdigest()
+    return int(seed[:8], 16) % 1000
+
+
+# -------------------------------------------------
+# MAIN GENERATOR
+# -------------------------------------------------
+def generate_response(query, results, user_id=None):
+
+    context = format_context(results)
+    memory = load_user_memory()
+
+    # ---------------------------
+    # USER PROFILE
+    # ---------------------------
+    profile = {}
+    if user_id:
+        try:
+            profile = build_user_profile(user_id)
+        except:
+            profile = {}
+
+    # ---------------------------
+    # FIXED USER VECTOR (IMPORTANT)
+    # ---------------------------
+    user_vec = build_user_vector(profile, memory, user_id, query)
+
+    # ---------------------------
+    # RANKING
+    # ---------------------------
+    ranked = learning_rerank(
+        query=query,
+        items=context,
+        user_id=user_id,
+        profile=profile,
+        memory=memory
+    )[:5]
+
+    # ---------------------------
+    # UPDATE MEMORY (CRITICAL FOR PERSONALIZATION)
+    # ---------------------------
+    if user_id:
+        memory.setdefault(user_id, {})
+        memory[user_id].setdefault("seen_businesses", [])
+
+        for r in ranked:
+            bid = r.get("business_id")
+            if bid and bid not in memory[user_id]["seen_businesses"]:
+                memory[user_id]["seen_businesses"].append(bid)
+
+        memory[user_id]["seen_businesses"] = memory[user_id]["seen_businesses"][-100:]
+        save_user_memory(memory)
+
+    # ---------------------------
+    # FORMAT FOR LLM
+    # ---------------------------
+    formatted = "\n".join([
+        f"{i+1}. {r.get('business_name')} | {r.get('category')} | rating={r.get('stars')} | score={r.get('score', 0):.3f}"
+        for i, r in enumerate(ranked)
+    ])
+
+    # ---------------------------
+    # PROMPT
+    # ---------------------------
+    prompt = f"""
+You are a recommendation explanation engine.
+
+RULES:
+- Do NOT refuse
+- Do NOT say you cannot help
+- ONLY explain ranked results
+
+USER QUERY:
+{query}
+
+RANKED RESULTS:
+{formatted}
+
+TASK:
+1. Explain ranking clearly
+2. Personalize based on inferred preferences
+3. Compare options
+4. Highlight tradeoffs
+5. Keep concise
+"""
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.5 + (stable_noise(user_id or "anon", query) / 5000)
+        }
+    }
+
+    try:
+        response = requests.post(OLLAMA_URL, json=payload, timeout=120)
+        data = response.json()
+        text = data.get("response", "")
+
+        if user_id:
+            update_user_memory(user_id, query, text)
+
+        return {
+            "success": True,
+            "recommendations": ranked,
+            "ai_response": text,
+            "context_size": len(context),
+            "self_learning": True
+        }
+
+    except Exception as e:
+        return {
+            "success": True,
+            "recommendations": ranked,
+            "ai_response": "LLM unavailable - showing ranked results only",
+            "error": str(e),
+            "self_learning": True
+        }
+
+===== FILE: ./project/utils/data_loader.py =====
+import os
+import pandas as pd
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+DATA_PATH = os.path.join(BASE_DIR, "data", "processed")
+
+
+def load_reviews():
+    path = os.path.join(DATA_PATH, "reviews.csv")
+    df = pd.read_csv(path)
+    df.columns = df.columns.str.strip()
+    return df
+
+
+def load_businesses():
+    path = os.path.join(DATA_PATH, "businesses.csv")
+    df = pd.read_csv(path)
+    df.columns = df.columns.str.strip()
+    return df
+
+===== FILE: ./project/recommender/recommender.py =====
+import numpy as np
+import pandas as pd
+from sentence_transformers import SentenceTransformer
+from retrieval.retrieve import retrieve
+from models.user_profile import build_user_profile
+
+# -------------------------------------------------
+# MODEL
+# -------------------------------------------------
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
+
+# -------------------------------------------------
+# BUILD CATEGORY SPACE (NO HARDCODING)
+# -------------------------------------------------
+def build_category_space(businesses_df):
+    """
+    Creates semantic embeddings for all categories in dataset.
+    """
+    category_map = {}
+
+    for _, row in businesses_df.iterrows():
+        cats = str(row.get("categories", "")).lower().split(",")
+
+        for c in cats:
+            c = c.strip()
+            if c and c not in category_map:
+                category_map[c] = embedder.encode(c)
+
+    return category_map
+
+
+# -------------------------------------------------
+# QUERY UNDERSTANDING (SEMANTIC ONLY)
+# -------------------------------------------------
+def infer_query_vector(query):
+    return embedder.encode(query)
+
+
+# -------------------------------------------------
+# CATEGORY MATCH SCORE
+# -------------------------------------------------
+def category_alignment_score(query_vec, category_vec):
+    if category_vec is None:
+        return 0.0
+
+    return float(np.dot(query_vec, category_vec) /
+                 (np.linalg.norm(query_vec) * np.linalg.norm(category_vec) + 1e-9))
+
+
+# -------------------------------------------------
+# MAIN RECOMMENDER AGENT
+# -------------------------------------------------
+def recommend(query, user_id=None, businesses_df=None, k=5):
+    """
+    Agentic recommender:
+    - no hardcoded intent rules
+    - semantic category inference
+    - retrieval + reranking + personalization
+    """
+
+    # ---------------------------
+    # STEP 1: USER PROFILE
+    # ---------------------------
+    try:
+        profile = build_user_profile(user_id) if user_id else None
+    except:
+        profile = None
+
+    # ---------------------------
+    # STEP 2: SEMANTIC QUERY VECTOR
+    # ---------------------------
+    query_vec = infer_query_vector(query)
+
+    # ---------------------------
+    # STEP 3: CATEGORY SPACE (DYNAMIC)
+    # ---------------------------
+    category_space = build_category_space(businesses_df) if businesses_df is not None else {}
+
+    # infer closest categories (soft matching)
+    category_scores = {}
+    for cat, vec in category_space.items():
+        category_scores[cat] = category_alignment_score(query_vec, vec)
+
+    top_categories = sorted(category_scores.items(), key=lambda x: x[1], reverse=True)[:3]
+    top_categories = [c[0] for c in top_categories]
+
+    # ---------------------------
+    # STEP 4: BASE RETRIEVAL
+    # ---------------------------
+    raw = retrieve(query=query, user_id=user_id, k=30)
+    candidates = raw.get("results", [])
+
+    if not candidates:
+        return {
+            "query": query,
+            "recommendations": []
+        }
+
+    # ---------------------------
+    # STEP 5: RERANKING (AGENTIC SCORING)
+    # ---------------------------
+    final = []
+
+    for item in candidates:
+
+        item_text = f"{item['business_name']} {item['category']} {item['text']}"
+        item_vec = embedder.encode(item_text)
+
+        # semantic similarity
+        sim = float(np.dot(query_vec, item_vec) /
+                    (np.linalg.norm(query_vec) * np.linalg.norm(item_vec) + 1e-9))
+
+        # category bonus (soft, not hardcoded)
+        cat_bonus = 0.0
+        for tc in top_categories:
+            if tc in item["category"].lower():
+                cat_bonus += 0.10
+
+        # base score
+        score = item["score"]
+
+        # final blended score
+        score = (
+            0.45 * sim +
+            0.35 * score +
+            0.20 * cat_bonus
+        )
+
+        item["final_score"] = score
+        final.append(item)
+
+    # ---------------------------
+    # STEP 6: SORT
+    # ---------------------------
+    final.sort(key=lambda x: x["final_score"], reverse=True)
+
+    # ---------------------------
+    # STEP 7: RETURN TOP-K
+    # ---------------------------
+    return {
+        "query": query,
+        "user_id": user_id,
+        "inferred_categories": top_categories,
+        "recommendations": final[:k]
+    }
+
+===== FILE: ./project/Dockerfile =====
+# -------------------------------------------------
+# BASE IMAGE (stable + ML friendly)
+# -------------------------------------------------
+FROM python:3.10-slim
+
+# -------------------------------------------------
+# ENV SETTINGS
+# -------------------------------------------------
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# FAISS sometimes needs this
+ENV LD_LIBRARY_PATH=/usr/local/lib
+
+# -------------------------------------------------
+# SYSTEM DEPENDENCIES
+# -------------------------------------------------
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    curl \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# -------------------------------------------------
+# WORKDIR
+# -------------------------------------------------
+WORKDIR /app
+
+# -------------------------------------------------
+# COPY REQUIREMENTS FIRST (for caching)
+# -------------------------------------------------
+COPY requirements.txt .
+
+# -------------------------------------------------
+# PIP INSTALL
+# -------------------------------------------------
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir -r requirements.txt
+
+# -------------------------------------------------
+# COPY PROJECT
+# -------------------------------------------------
+COPY . .
+
+# -------------------------------------------------
+# PORT (FastAPI default)
+# -------------------------------------------------
+EXPOSE 8000
+
+# -------------------------------------------------
+# START COMMAND
+# -------------------------------------------------
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+===== FILE: ./project/prompts/planner.txt =====
+
+
+===== FILE: ./project/prompts/evaluator.txt =====
+
+
+===== FILE: ./project/prompts/generator.txt =====
+
+
+===== FILE: ./README.md =====
+# DSNxBCT_LLM_Agent
+
+LLM-powered User Modeling & Review Generation and Recommendation System for the DSN × BCT Data & AI Hackathon 3.0.
+
+---
+
+# 🧠 Overview
+
+This project builds a **user-aware LLM agent system** that learns from Yelp-style data and generates:
+
+- ⭐ Personalized rating predictions  
+- ✍🏾 Realistic review text generation  
+- 👤 User behavior modeling  
+- 🎯 Personalized recommendations
+- 🌐 FastAPI-based inference service  
+
+It uses **local LLM inference via Ollama** to ensure offline, low-cost deployment.
+
+---
+
+## 📁 Project Structure
+```text
+project/
+├── app.py
+├── api/                  # FastAPI routes
+├── assets/               # Demo screenshots and presentation visuals
+├── data/                 # Raw + processed data + embeddings
+├── models/               # Rating, ranking, review & behavior models
+├── rag/                  # Response generation (RAG pipeline)
+├── recommender/          # Recommendation engine
+├── retrieval/            # FAISS + embedding search
+├── training/             # Model training scripts
+├── evaluation/           # Evaluation metrics & scoring
+├── prompts/              # LLM prompts
+├── utils/                # Helper utilities
+├── Dockerfile
+├── docker-compose.yml
+└── requirements.txt
+```
+---
+
+## 🏗️ Architecture Diagram
+```text
+                +-------------------+
+                | Yelp Dataset      |
+                +-------------------+
+                          |
+                          v
+                +-------------------+
+                | Data Processing   |
+                +-------------------+
+                          |
+          +---------------+---------------+
+          |                               |
+          v                               v
++-------------------+       +----------------------+
+| User Profiling    |       | Embedding + FAISS    |
++-------------------+       +----------------------+
+          |                               |
+          +---------------+---------------+
+                          |
+                          v
+                +-------------------+
+                | LLM Agent Layer   |
+                | (Ollama)          |
+                +-------------------+
+                          |
+          +---------------+---------------+
+          |                               |
+          v                               v
++-------------------+       +----------------------+
+| Review Generator  |       | Recommendation API   |
++-------------------+       +----------------------+
+                          |
+                          v
+                +-------------------+
+                | FastAPI Service   |
+                +-------------------+
+```
+
+---
+
+# 🚀 Key Features
+
+## 👤 User Modeling
+Learns user behavior from historical reviews:
+
+- Average rating behavior
+- Favorite business categories
+- Reviewer style classification:
+  - strict reviewer
+  - balanced reviewer
+  - lenient reviewer
+
+---
+
+## ⭐ Review Generation (Task A)
+
+Given:
+- `user_id`
+- `business_id`
+
+The system:
+- Predicts rating (1–5)
+- Generates realistic review text
+- Adapts tone based on user personality
+
+---
+
+## 🎯 Recommendation System (Task B)
+
+Given:
+- `query`
+- `user_id`
+
+The system:
+- Recommends relevant businesses
+- Personalizes results based on user preferences
+- Ranks recommendations by relevance
+
+---
+
+## 🌐 API Service (FastAPI)
+
+Fully container-ready REST API for evaluation and demo purposes.
+
+---
+
+# 🔄 System Pipeline
+```text
+Yelp Dataset (Raw JSON)
+        ↓
+Data Processing Layer (process_data.py)
+        ↓
+Processed Data (CSV + embeddings)
+        ↓
+User Profiling Engine (user_profile.py)
+        ↓
+LLM Review Generator (review_generator.py, Ollama)
+        ↓
+Recommendation Engine (recommender.py)
+        ↓
+FastAPI Service Layer (app.py)
+```
+
+---
+
+# 📊 Dataset
+
+**Yelp Open Dataset** (real-world business reviews and user interactions):
+
+- review.json
+- business.json
+- user.json
+
+Processed into:
+```text
+data/processed/
+├── reviews.csv
+├── businesses.csv
+└── users.csv
+```
+---
+
+## ⚙️ Tech Stack
+
+- 🐍 Python
+- ⚡ FastAPI
+- 🤖 Ollama (LLM)
+- 🔍 FAISS
+- 🧠 Pandas, NumPy
+- 📊 Scikit-learn
+- 🐳 Docker
+- 🗄️ JSON / CSV
+
+---
+
+## 📋 Prerequisites
+- Python 3.10+
+- Docker
+- Ollama
+- Ubuntu 22.04+
+- 8GB RAM recommended
+
+---
+
+## ⚙️ Full Setup Guide (Manual Deployment)
+
+### Step 1: Clone Repository
+```bash
+git clone https://github.com/Take-Off-7/DSNxBCT_LLM_Agent
+cd DSNxBCT_LLM_Agent/project
+```
+
+### Step 2: Install Ollama
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+### Step 3: Start Ollama Server
+```bash
+ollama serve
+```
+Ollama runs by default at:
+http://localhost:11434
+
+### Step 4: Pull Required Model
+Open a NEW terminal:
+```bash
+ollama pull llama3.2:1b
+```
+
+### Step 5: Pull and Run API Docker Container
+Open another terminal:
+```bash
+docker pull takeoff7/llm-agent:latest
+docker run --network=host -e OLLAMA_URL=http://localhost:11434/api/generate takeoff7/llm-agent:latest
+```
+
+---
+
+## 🔌 API Access & Endpoints
+
+After setup, open your browser and navigate to:
+
+http://localhost:8000
+
+Then append `/docs` to access the OpenAPI Swagger UI:
+
+http://localhost:8000/docs
+
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/` | GET | Confirm API is running properly |
+| `/samples` | GET | Supply sample IDs for quick testing  |
+| `/profile` | POST | Build and fetch user profile |
+| `/review` | POST | Generate simulated review for a user and business |
+| `/recommend` | POST | Return personalized ranked recommendations |
+| `/llm-status` | GET | Health check and  Ollama connection status |
+
+---
+
+## 🧪 Testing & Usage Guide
+
+### 🔹 Testing Review Generation (`POST /review`)
+
+- Call `/samples` to get valid test IDs  
+- Copy a `user_id` and `business_id`  
+- Send request:
+
+```json
+{
+  "user_id": "FJf1k333aqmmMaMTv-CFNA",
+  "business_id": "G6lbDeRY_ZpD7FS5dL3qJw"
+}
+```
+
+### 🔹 Testing Recommendations (`POST /recommend`)
+- Call `/samples` to get valid `user_id`  
+- Provide a query along with the `user_id`
+- Send request:
+
+```json
+{
+  "query": "recommend a coffee shop",
+  "user_id": "lcp3WgYyYRfcqewpilwmyg"
+}
+```
+
+---
+
+## 🚀 Future Work
+
+- Multi-modal recommendations
+- Fine-tuned review generation
+- Real-time user adaptation
+- Hybrid retrieval + graph recommendation
+- Streaming LLM responses
+
+---
+
+## 👥 Contributors
+
+- Fakeye Taiwo
+- Fakeye Kehinde
+- Bamigbade Babatunde
+- Godwin Chidera
+
+---
+
+## 📄 License
+
+MIT License
+
+---
+
+## 🙏 Acknowledgements
+We would like to thank the following organizations, tools, platforms, and open-source communities that made this project possible:
+- **Bluechip Technologies** and **Data Science Nigeria (DSN)**  — for organizing the **DSN x BCT LLM Agent Challenge** and providing the opportunity to build and showcase innovative AI solutions.
+- **Yelp Open Dataset** — for providing large-scale real-world business, review, and user interaction data used for training and evaluation.
+- **Ollama** — for enabling efficient local LLM inference and offline deployment capabilities.
+- **FAISS** — for fast and scalable vector similarity search used in semantic retrieval.
+- **FastAPI** — for powering the lightweight and high-performance API service layer.
+- **Scikit-learn, Pandas, and NumPy** — for machine learning utilities, data processing, and numerical computation.
+- The broader **open-source AI community** for tools, research, and resources that inspired and supported this project.
+
+
