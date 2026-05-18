@@ -284,31 +284,31 @@ http://localhost:8000/docs
 ## 📸 Demo
 
 ### Swagger API
-![swagger](project/assets/swagger1.png)
-![swagger](project/assets/swagger2.png)
+![swagger](project/assets/swagger1.jpeg)
+![swagger](project/assets/swagger2.jpeg)
 
 ### Home
 ![swagger](project/assets/home1.png)
-![swagger](project/assets/home2.png)
+![swagger](project/assets/home2.jpeg)
 
 ### User Profile
-![profile](project/assets/profile1.png)
-![profile](project/assets/profile2.png)
-![profile](project/assets/profile2.png)
+![profile](project/assets/profile1.jpeg)
+![profile](project/assets/profile2.jpeg)
+![profile](project/assets/profile2.jpeg)
 
 ### Review Generation
-![review](project/assets/review1.png)
-![review](project/assets/review2.png)
-![review](project/assets/review3.png)
+![review](project/assets/review1.jpeg)
+![review](project/assets/review2.jpeg)
+![review](project/assets/review3.jpeg)
 
 ### Recommendation
-![recommend](project/assets/recommend1.png)
-![recommend](project/assets/recommend2.png)
-![recommend](project/assets/recommend3.png)
+![recommend](project/assets/recommend1.jpeg)
+![recommend](project/assets/recommend2.jpeg)
+![recommend](project/assets/recommend3.jpeg)
 
 ### LLM-Status
-![llm-status](project/assets/status1.png)
-![llm-status](project/assets/status2.png)
+![llm-status](project/assets/status1.jpeg)
+![llm-status](project/assets/status2.jpeg)
 
 ---
 
