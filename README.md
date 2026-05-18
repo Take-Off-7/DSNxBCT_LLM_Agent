@@ -294,7 +294,7 @@ http://localhost:8000/docs
 ### User Profile
 ![profile](project/assets/profile1.jpeg)
 ![profile](project/assets/profile2.jpeg)
-![profile](project/assets/profile2.jpeg)
+![profile](project/assets/profile3.jpeg)
 
 ### Review Generation
 ![review](project/assets/review1.jpeg)
