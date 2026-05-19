@@ -184,6 +184,17 @@ data/processed/
 
 ---
 
+## 🤖 Model Choice
+
+We selected `llama3.2:1b` because it provides:
+
+- Fast local inference
+- Low RAM usage
+- Offline deployment
+- Good enough instruction following for review generation
+
+---
+
 ## ⚙️ Full Setup Guide (Manual Deployment)
 
 ### Step 1: Clone Repository
@@ -266,6 +277,22 @@ http://localhost:8000/docs
   "business_id": "G6lbDeRY_ZpD7FS5dL3qJw"
 }
 ```
+- Output:
+
+```json
+{
+  "success": true,
+  "data": {
+    "user_id": "FJf1k333aqmmMaMTv-CFNA",
+    "business_id": "G6lbDeRY_ZpD7FS5dL3qJw"
+    "business_name": "Blue Bottle Coffee",
+    "rating": 4,
+    "review": "Omo the place make sense. I really enjoyed the coffee and pastries, and the overall experience dey on point. I would definitely consider visiting again.",
+    ...
+  },
+  "error": null
+}
+```
 
 ### 🔹 Testing Recommendations (`POST /recommend`)
 - Call `/samples` to get valid `user_id`  
@@ -276,6 +303,28 @@ http://localhost:8000/docs
 {
   "query": "recommend a coffee shop",
   "user_id": "lcp3WgYyYRfcqewpilwmyg"
+}
+```
+- Output:
+
+```json
+{
+  "success": true,
+  "data": {
+    "query": "recommend a coffee shop",
+    "user_id": "lcp3WgYyYRfcqewpilwmyg",
+    "recommendations": [
+      {
+        "business_id": "G6lbDeRY_ZpD7FS5dL3qJw"
+        "business_name": "Blue Bottle Coffee",
+        "stars": 4,
+        "score": 0.8280480624039984,
+      },
+      ...
+    ]
+    ...
+  },
+  "error": null
 }
 ```
 
