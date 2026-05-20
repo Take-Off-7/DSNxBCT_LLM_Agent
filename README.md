@@ -156,9 +156,9 @@ FastAPI Service Layer (app.py)
 Processed into:
 ```text
 data/processed/
-├── reviews.csv
-├── businesses.csv
-└── users.csv
+├── reviews.csv: 100k
+├── businesses.csv: 50k
+└── users.csv: 50k
 ```
 ---
 
@@ -321,7 +321,7 @@ http://localhost:8000/docs
         "score": 0.8280480624039984,
       },
       ...
-    ]
+    ],
     ...
   },
   "error": null
